@@ -341,14 +341,16 @@ class CrossPointSettings {
   uint8_t favoritesShortcutOrder = 13;
   uint8_t flashcardsShortcut = SHORTCUT_APPS;
   uint8_t flashcardsShortcutOrder = 14;
+  uint8_t dictionaryShortcut = SHORTCUT_APPS;
+  uint8_t dictionaryShortcutOrder = 15;
   uint8_t fileTransferShortcut = SHORTCUT_APPS;
-  uint8_t fileTransferShortcutOrder = 15;
+  uint8_t fileTransferShortcutOrder = 16;
   uint8_t screenCleanShortcut = SHORTCUT_APPS;
-  uint8_t screenCleanShortcutOrder = 16;
+  uint8_t screenCleanShortcutOrder = 17;
   uint8_t sleepShortcut = SHORTCUT_APPS;
-  uint8_t sleepShortcutOrder = 17;
+  uint8_t sleepShortcutOrder = 18;
   uint8_t opdsBrowserShortcut = SHORTCUT_HOME;
-  uint8_t opdsBrowserShortcutOrder = 18;
+  uint8_t opdsBrowserShortcutOrder = 19;
   uint8_t browseFilesShortcutVisible = 1;
   // Legacy Stats shortcut visibility retained for settings.json migration to readingStatsShortcut.
   uint8_t statsShortcutVisible = 1;
@@ -364,6 +366,7 @@ class CrossPointSettings {
   uint8_t bookmarksShortcutVisible = 1;
   uint8_t favoritesShortcutVisible = 1;
   uint8_t flashcardsShortcutVisible = 1;
+  uint8_t dictionaryShortcutVisible = 1;
   uint8_t fileTransferShortcutVisible = 1;
   uint8_t screenCleanShortcutVisible = 1;
   uint8_t sleepShortcutVisible = 1;

@@ -3,6 +3,8 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include <algorithm>
+
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -21,12 +23,15 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
 
 std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes) {
   std::vector<MenuItem> items;
-  items.reserve(14);
+  items.reserve(17);
   items.push_back({MenuAction::READER_SETTINGS, StrId::STR_READING_QUICK_SETTINGS});
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
   if (hasFootnotes) {
     items.push_back({MenuAction::FOOTNOTES, StrId::STR_FOOTNOTES});
   }
+  items.push_back({MenuAction::LOOK_UP_WORD, StrId::STR_LOOK_UP_WORD});
+  items.push_back({MenuAction::LOOKUP_HISTORY, StrId::STR_LOOKUP_HISTORY});
+  items.push_back({MenuAction::DICTIONARY, StrId::STR_DICTIONARY});
   items.push_back({MenuAction::VIEW_BOOKMARKS, StrId::STR_VIEW_BOOKMARKS});
   items.push_back({MenuAction::SAVE_BOOKMARK, StrId::STR_SAVE_BOOKMARK});
   items.push_back({MenuAction::ROTATE_SCREEN, StrId::STR_ORIENTATION});
@@ -91,6 +96,8 @@ void EpubReaderMenuActivity::loop() {
 void EpubReaderMenuActivity::render(RenderLock&&) {
   renderer.clearScreen();
   const auto pageWidth = renderer.getScreenWidth();
+  const auto pageHeight = renderer.getScreenHeight();
+  const auto& metrics = UITheme::getInstance().getMetrics();
   const auto orientation = renderer.getOrientation();
   // Landscape orientation: button hints are drawn along a vertical edge, so we
   // reserve a horizontal gutter to prevent overlap with menu content.
@@ -121,31 +128,39 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
                    std::to_string(totalPages) + std::string(tr(STR_PAGES_SEPARATOR));
   }
   progressLine += std::string(tr(STR_BOOK_PREFIX)) + std::to_string(bookProgressPercent) + "%";
-  renderer.drawCenteredText(UI_10_FONT_ID, 45, progressLine.c_str());
+  renderer.drawCenteredText(UI_10_FONT_ID, 45 + contentY, progressLine.c_str());
 
   // Menu Items
   const int startY = 75 + contentY;
   constexpr int lineHeight = 28;
+  const int listBottom = std::max(startY + lineHeight, pageHeight - metrics.buttonHintsHeight - metrics.verticalSpacing);
+  const int visibleRows = std::max(1, std::min(static_cast<int>(menuItems.size()), (listBottom - startY) / lineHeight));
+  int firstVisible = 0;
+  if (selectedIndex >= visibleRows) {
+    firstVisible = selectedIndex - visibleRows + 1;
+  }
+  firstVisible = std::clamp(firstVisible, 0, std::max(0, static_cast<int>(menuItems.size()) - visibleRows));
 
-  for (size_t i = 0; i < menuItems.size(); ++i) {
-    const int displayY = startY + (i * lineHeight);
-    const bool isSelected = (static_cast<int>(i) == selectedIndex);
+  for (int row = 0; row < visibleRows; ++row) {
+    const int itemIndex = firstVisible + row;
+    const int displayY = startY + (row * lineHeight);
+    const bool isSelected = itemIndex == selectedIndex;
 
     if (isSelected) {
       // Highlight only the content area so we don't paint over hint gutters.
       renderer.fillRect(contentX, displayY, contentWidth - 1, lineHeight, true);
     }
 
-    renderer.drawText(UI_10_FONT_ID, contentX + 20, displayY, I18N.get(menuItems[i].labelId), !isSelected);
+    renderer.drawText(UI_10_FONT_ID, contentX + 20, displayY, I18N.get(menuItems[itemIndex].labelId), !isSelected);
 
-    if (menuItems[i].action == MenuAction::ROTATE_SCREEN) {
+    if (menuItems[itemIndex].action == MenuAction::ROTATE_SCREEN) {
       // Render current orientation value on the right edge of the content area.
       const char* value = I18N.get(orientationLabels[pendingOrientation]);
       const auto width = renderer.getTextWidth(UI_10_FONT_ID, value);
       renderer.drawText(UI_10_FONT_ID, contentX + contentWidth - 20 - width, displayY, value, !isSelected);
     }
 
-    if (menuItems[i].action == MenuAction::AUTO_PAGE_TURN) {
+    if (menuItems[itemIndex].action == MenuAction::AUTO_PAGE_TURN) {
       // Render current page turn value on the right edge of the content area.
       const auto value = pageTurnLabels[selectedPageTurnOption];
       const auto width = renderer.getTextWidth(UI_10_FONT_ID, value);

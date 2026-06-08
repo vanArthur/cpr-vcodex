@@ -7,7 +7,7 @@
 # CPR-vCodex
 
 <p align="center">
-  <img src="./docs/images/logotext_by_Which-Estimate4566.svg" alt="CPR-vCodex logo" width="720" />
+  <img src="./docs/images/500x100.png" alt="CPR-vCodex logo" width="500" />
   <br />
   <sub>Logo contributed by Which-Estimate4566.</sub>
 </p>
@@ -26,15 +26,18 @@ Unlike a complete rewrite, CPR-vCodex intentionally stays close to the upstream 
 
 Some of the main additions include:
 
-- advanced reading statistics and reading heatmaps
-- achievements and reading consistency tracking
-- Sync Day support for reliable offline day-based statistics
-- reading profiles and session analysis
-- per-book reading time correction tools
-- customizable UI and reading layouts
-- downloadable SD-card font management
-- additional reader utilities and workflow improvements
-- carefully selected upstream improvements and fixes
+- full reading analytics: reading stats, heatmaps, day detail, reading profile, session history, goals, streaks, and achievements
+- Sync Day support for reliable offline day-based statistics on hardware without a trustworthy sleep RTC
+- per-book statistics tools, including reading-time correction, start-date editing, and per-book stats reset
+- StarDict dictionary support from the SD card, with selectable monolingual and translation dictionaries, per-language folders, reader word lookup, suggestions, and lookup history
+- offline Flashcards with CSV decks, multiple study modes, recents, stats, and session summaries
+- EPUB bookmarks with explicit reader-menu actions plus a global bookmarks app
+- customizable Home and Apps shortcuts, reader quick settings, reading layouts, themes, and Lyra Carousel workflow improvements
+- enhanced sleep tools, including custom image directories, cover/custom stats screens, sleep previews, cached sleep frames, and configurable clean sleep refresh
+- downloadable and manually installable SD-card fonts, including vCodex-only families such as `ChareInk`
+- Screen Clean, SD firmware update, Auto Flash, reading stats editor, and other maintenance/workflow utilities
+- KOReader Sync, OPDS filename options, reader refresh controls, Bionic Reading, text darkness, dark mode, and other reader quality-of-life settings
+- carefully selected upstream CrossPoint improvements and fixes adapted without dropping vCodex-specific behavior
 
 The philosophy of this fork is simple: keep the firmware fast, stable, and focused on reading, while making the device feel more rewarding and personal for people who read every day.
 
@@ -44,12 +47,12 @@ The philosophy of this fork is simple: keep the firmware fast, stable, and focus
 |---|---|
 | Project | `CPR-vCodex` |
 | Device | `Xteink X4`; `Xteink X3` compatibility reported by users, not personally tested |
-| Current release (CPR-vCodex) build | [`1.3.0.17-cpr-vcodex`](https://github.com/franssjz/cpr-vcodex/releases/tag/1.3.0.17-cpr-vcodex) |
+| Current release (CPR-vCodex) build | [`1.3.0.18-cpr-vcodex`](https://github.com/franssjz/cpr-vcodex/releases/tag/1.3.0.18-cpr-vcodex) |
 | Latest SD font package | [`sd-fonts-m1-b4`](https://github.com/franssjz/cpr-vcodex/releases/tag/sd-fonts-m1-b4) |
 | Changelog | [CHANGELOG.md](./CHANGELOG.md) |
 | Current release sync | Selected CrossPoint Reader fixes after [`3392b3e3`](https://github.com/crosspoint-reader/crosspoint-reader/commit/3392b3e3) through [`fd5b8078`](https://github.com/crosspoint-reader/crosspoint-reader/commit/fd5b8078), including EPUB image/cache/CSS/parser performance, KOReader chapter-start mapping, font-upload hardening, long-press chapter-start navigation, progress-bar placement, and `open-x4-sdk` [`26648d6`](https://github.com/crosspoint-reader/community-sdk/commit/26648d643a1c883ab2f71e1869d05fe2a0c9d498). Hebrew/RTL, translation-only churn, OpenDyslexic storage migration, docs-only guide updates, and t5s3 README-only changes remain deferred. |
-| Current release fixes | Restores explicit EPUB reader-menu bookmark actions with `View bookmarks` and `Save bookmark`, keeps the bookmark list reachable before the first bookmark exists, and prevents the save action from removing an already-saved page. |
-| Latest release notes | - Added `View bookmarks` back to the EPUB reader menu as a dedicated action.<br>- Added `Save bookmark` to store the current page directly from the same menu.<br>- Kept long-press `Select` bookmark toggling unchanged for users who prefer the shortcut.<br>- Made `Save bookmark` idempotent: selecting it on an already-bookmarked page shows a popup instead of deleting the bookmark.<br>- Added synchronized UI translations for the new bookmark actions across all 23 bundled languages. |
+| Current release fixes | Adds SD-card StarDict dictionary support with selectable dictionary folders, in-reader word lookup, lookup history, suggestions, and a floating paged definition overlay. |
+| Latest release notes | - Added the `Dictionary` app for selecting StarDict dictionaries stored under `/dictionaries/<language>/` on the SD card.<br>- Added EPUB reader menu actions for `Look up word`, `Lookup history`, and opening the Dictionary app without losing the current book session.<br>- Added word-selection navigation, rounded word highlights, suggestion fallback, and a 75% definition popup with pagination and dark-mode support.<br>- Added configurable definition text size, cleanable/capped lookup history, generated `.cpridx` lookup caches, optional `.syn` synonym support, and improved definition cleanup/formatting.<br>- Documented the required StarDict `.ifo`, `.idx`, and uncompressed `.dict` files, `.dict.dz` extraction, first-activation cache time, and dictionary download sources. |
 | Base firmware line | `CrossPoint Reader 1.3.0` |
 | Latest official commit reviewed | [`fd5b8078`](https://github.com/crosspoint-reader/crosspoint-reader/commit/fd5b8078) |
 | Latest official commit incorporated | Selected EPUB/rendering, cache, filesystem, image, KOReader Sync, font-upload, SDK, and navigation fixes from [`7accc607`](https://github.com/crosspoint-reader/crosspoint-reader/commit/7accc607) through [`fd5b8078`](https://github.com/crosspoint-reader/crosspoint-reader/commit/fd5b8078); larger upstream bookmark, RTL, OTA/downloader, translation-bulk, and settings rewrites remain intentionally deferred. |
@@ -59,6 +62,69 @@ The philosophy of this fork is simple: keep the firmware fast, stable, and focus
 
 - [Auto Flash](https://franssjz.github.io/cpr-vcodex/flash.html) installs the latest CPR-vCodex firmware from Chrome or Edge using Web Serial.
 - [Reading Stats Editor](https://franssjz.github.io/cpr-vcodex/reading-stats-editor/) edits exported reading stats locally in the browser. No upload, no server.
+
+## SD card DICTIONARIES
+
+`CPR-vCodex` can use StarDict-format dictionaries stored on the microSD card. Dictionary data stays on the SD card; after a dictionary is selected, the firmware creates a small `.cpridx` cache next to it so later lookups stay fast.
+
+Important: a loose `.dict` file is not enough. The dictionary must be a complete StarDict package with matching `.ifo`, `.idx`, and uncompressed `.dict` files using the same base filename.
+
+Recommended microSD layout:
+
+```text
+SD:/
+  dictionaries/
+    spanish/
+      es-es.ifo
+      es-es.idx
+      es-es.dict
+      es-es.syn        # optional synonym/headword file
+      es-es.cpridx     # generated by CPR-vCodex; do not copy manually
+    english-spanish/
+      en-es.ifo
+      en-es.idx
+      en-es.dict
+```
+
+Each language or dictionary group lives in `dictionaries/<language>/`. The directory name is the visible language/group label, so names such as `spanish`, `english`, `english-spanish`, or `en-es` are all valid. Each directory may contain one or more dictionaries.
+
+For every StarDict dictionary, the required files are:
+
+- `<name>.ifo`: dictionary metadata, including name, word count, and format hints.
+- `<name>.idx`: word index; it maps each headword to the byte offset of its definition.
+- uncompressed `<name>.dict`: definition data.
+
+Optional files:
+
+- `<name>.syn` enables alternate headwords and synonym redirects when the dictionary provides them.
+- `<name>.cpridx` is generated by CPR-vCodex after preparing the dictionary and should not be downloaded or copied by hand.
+
+Compressed `<name>.dict.dz` dictionaries are detected but are not currently supported directly. If the downloaded package contains a `.dict.dz` file, open or extract it first and copy the resulting uncompressed `.dict` file to the SD card. The valid format for CPR-vCodex is `.dict`, not compressed `.dict.dz`.
+
+Use on the Xteink:
+
+1. Copy the dictionary files to `dictionaries/<language>/` on the microSD card.
+2. Reinsert the card and open `Apps > Dictionary`.
+3. Choose the definition text size. `Medium` is the default.
+4. Select the dictionary to prepare and activate it. Depending on the dictionary size, the first activation can take several seconds while CPR-vCodex builds its lookup cache.
+5. While reading an EPUB, open the reader menu to use `Look up word`, `Lookup history`, or `Dictionary` to change the active dictionary/configuration and return to the book.
+
+Dictionary download sources vary in quality, completeness, format, and license. Always extract the downloaded package until you have the `.ifo`, `.idx`, and `.dict` files, and check the license before redistributing a dictionary.
+
+Translation dictionaries:
+- [Recommended Mix [ES, EN] - MEGA](https://mega.nz/folder/RDFSRTSA#QCwev-ICsGG_XsTKV0glrQ/folder/BSdzWDxA)
+- [Recommended Mix [ES, EN] - MEDIAFIRE](https://www.mediafire.com/folder/xistn8eurgvih/xteink#jdlxf65m3l4c3)
+- [English](https://drive.google.com/file/d/1b2Z...ew?usp=sharing) Shorter Oxford English Dictionary
+- [reader.dict](https://www.reader-dict.com/) offers free monolingual StarDict downloads under the "monolingual version for free" section. The dictionary from this source is currently weak.
+- [reader.dict English](https://www.reader-dict.com/download/en) provides English StarDict downloads.
+- [Spanish dictionary pack](https://drive.proton.me/urls/DRR38240S0#KJRRl44xb709) contains several Spanish dictionaries. Create one separate `dictionaries/<dictionary-name>/` directory for each dictionary if you want to test them independently.
+
+Monolingual (Defining) dictionary:
+- [Recommended Mix [ES, EN] - MEGA](https://mega.nz/folder/RDFSRTSA#QCwev-ICsGG_XsTKV0glrQ/folder/4WNV3RiR)
+- [Recommended Mix [ES, EN] - MEDIAFIRE](https://www.mediafire.com/folder/xistn8eurgvih/xteink#7ox8nert1gl68)
+- [WikDict StarDict downloads](https://download.wikdict.com/dictionaries/stardict/) provides direct StarDict ZIP downloads for many language pairs.
+
+If you know reliable public dictionary links for more languages, please contact the project or open an issue/discussion so this list can be updated.
 
 ## SD card fonts
 
@@ -516,7 +582,7 @@ Each packaged dev build now keeps the base firmware line and the local flash ide
 Practical values to look at:
 
 - base firmware line: `CrossPoint Reader 1.3.0`
-- current release build style: `1.3.0.17-cpr-vcodex`
+- current release build style: `1.3.0.18-cpr-vcodex`
 - packaged artifact style: `artifacts/<version>-cpr-vcodex.bin`
 
 The incremental `.bNNNN` suffix exists specifically to help distinguish newer flashes from older ones on real hardware.
@@ -586,10 +652,10 @@ Release publishing:
 - before tagging, run:
 
 ```powershell
-python scripts/pre_release_check.py --tag 1.3.0.17-cpr-vcodex
+python scripts/pre_release_check.py --tag 1.3.0.18-cpr-vcodex
 ```
 
-- push a stable tag named like `1.3.0.17-cpr-vcodex`
+- push a stable tag named like `1.3.0.18-cpr-vcodex`
 - the release workflow builds `gh_release`, validates that the packaged artifact
   name matches the tag, and attaches only the flashable `<tag>.bin` to the GitHub Release
 - tagged CI release builds derive the firmware release number from the tag, not

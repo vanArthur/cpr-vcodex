@@ -510,6 +510,10 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
       clamp(doc["flashcardsShortcut"] | s.flashcardsShortcut, shortcutLocationCount, s.flashcardsShortcut);
   s.flashcardsShortcutOrder =
       clamp(doc["flashcardsShortcutOrder"] | s.flashcardsShortcutOrder, shortcutOrderCount, s.flashcardsShortcutOrder);
+  s.dictionaryShortcut =
+      clamp(doc["dictionaryShortcut"] | s.dictionaryShortcut, shortcutLocationCount, s.dictionaryShortcut);
+  s.dictionaryShortcutOrder =
+      clamp(doc["dictionaryShortcutOrder"] | s.dictionaryShortcutOrder, shortcutOrderCount, s.dictionaryShortcutOrder);
   s.fileTransferShortcut =
       clamp(doc["fileTransferShortcut"] | s.fileTransferShortcut, shortcutLocationCount, s.fileTransferShortcut);
   s.fileTransferShortcutOrder = clamp(doc["fileTransferShortcutOrder"] | s.fileTransferShortcutOrder,
@@ -565,6 +569,9 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
   s.flashcardsShortcutVisible =
       clamp(doc["flashcardsShortcutVisible"] | s.flashcardsShortcutVisible, static_cast<uint8_t>(2),
             s.flashcardsShortcutVisible);
+  s.dictionaryShortcutVisible =
+      clamp(doc["dictionaryShortcutVisible"] | s.dictionaryShortcutVisible, static_cast<uint8_t>(2),
+            s.dictionaryShortcutVisible);
   s.fileTransferShortcutVisible =
       clamp(doc["fileTransferShortcutVisible"] | s.fileTransferShortcutVisible, static_cast<uint8_t>(2),
             s.fileTransferShortcutVisible);
@@ -808,6 +815,8 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["favoritesShortcutOrder"] = s.favoritesShortcutOrder;
   doc["flashcardsShortcut"] = s.flashcardsShortcut;
   doc["flashcardsShortcutOrder"] = s.flashcardsShortcutOrder;
+  doc["dictionaryShortcut"] = s.dictionaryShortcut;
+  doc["dictionaryShortcutOrder"] = s.dictionaryShortcutOrder;
   doc["fileTransferShortcut"] = s.fileTransferShortcut;
   doc["fileTransferShortcutOrder"] = s.fileTransferShortcutOrder;
   doc["screenCleanShortcut"] = s.screenCleanShortcut;
@@ -829,6 +838,7 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["bookmarksShortcutVisible"] = s.bookmarksShortcutVisible;
   doc["favoritesShortcutVisible"] = s.favoritesShortcutVisible;
   doc["flashcardsShortcutVisible"] = s.flashcardsShortcutVisible;
+  doc["dictionaryShortcutVisible"] = s.dictionaryShortcutVisible;
   doc["fileTransferShortcutVisible"] = s.fileTransferShortcutVisible;
   doc["screenCleanShortcutVisible"] = s.screenCleanShortcutVisible;
   doc["sleepShortcutVisible"] = s.sleepShortcutVisible;

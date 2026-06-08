@@ -9,6 +9,8 @@
 #include "EpubReaderMenuActivity.h"
 #include "activities/Activity.h"
 
+class Page;
+
 class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
@@ -92,6 +94,7 @@ class EpubReaderActivity final : public Activity {
   void markCurrentBookAsFinished();
   void pageTurn(bool isForwardTurn);
   void requestCurrentPageFullRefresh();
+  std::shared_ptr<Page> loadCurrentPageForOverlay(int& outMarginLeft, int& outMarginTop);
 
   // Footnote navigation
   void navigateToHref(const std::string& href, bool savePosition = false);
