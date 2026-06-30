@@ -1113,7 +1113,7 @@ void SleepActivity::renderReadingHeatmapSleepScreen() const {
   const int gridHeight = rows * cellSize + (rows + 1) * gap;
 
   const int offsetX = (screenW - gridWidth) / 2;
-  const int offsetY = (screenH - gridHeight) / 2;
+  const int offsetY = gap;
   const uint32_t referenceDayOrdinal = getHeatmapReferenceDayOrdinal();
 
   renderer.clearScreen();
@@ -1135,8 +1135,18 @@ void SleepActivity::renderReadingHeatmapSleepScreen() const {
         renderer.fillRect(x + 1, y + 1, std::max(0, cellSize - 2), std::max(0, cellSize - 2), true);
       }
 
-      renderer.drawRect(x, y, cellSize, cellSize, true);
+      renderer.drawRect(x, y, cellSize, cellSize, 2, true);
     }
+  }
+
+  const int gridBottom = offsetY + gridHeight;
+  const std::string bookTitle = getCurrentBookTitle();
+  const std::string bookProgress = formatPercent(getCurrentBookProgress());
+  const std::string todayReading = ReadingStatsAnalytics::formatDurationHm(READING_STATS.getTodayReadingMs());
+  const std::string bottomText = !bookTitle.empty() ? bookTitle + " (" + bookProgress + ")" : bookProgress + " | " + todayReading;
+  if (!bookTitle.empty()) {
+    const int titleY = gridBottom + (screenH - gridBottom - 40) / 2;
+    renderer.drawCenteredText(SMALL_FONT_ID, titleY, bottomText.c_str());
   }
 
   displaySleepBuffer(renderer);
