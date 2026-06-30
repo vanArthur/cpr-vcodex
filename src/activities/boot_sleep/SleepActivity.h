@@ -22,5 +22,6 @@ class SleepActivity final : public Activity {
   void renderBitmapSleepScreen(const Bitmap& bitmap, const std::string& sourcePath = "") const;
   bool renderPngSleepScreen(const std::string& sourcePath) const;
   void renderBlankSleepScreen() const;
+  void renderReadingHeatmapSleepScreen() const;
   bool resolveLastBookCoverPath(std::string& coverBmpPath) const;
 };

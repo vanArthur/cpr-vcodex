@@ -6,8 +6,10 @@
 #include <algorithm>
 
 #include "MappedInputManager.h"
+#include "ReadingStatsStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ReadingStatsAnalytics.h"
 
 EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                const std::string& title, const int currentPage, const int totalPages,
@@ -24,6 +26,7 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
 std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes) {
   std::vector<MenuItem> items;
   items.reserve(17);
+  items.push_back({MenuAction::SESSION_LENGTH, StrId::STR_SESSION_LENGTH});
   items.push_back({MenuAction::READER_SETTINGS, StrId::STR_READING_QUICK_SETTINGS});
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
   if (hasFootnotes) {
@@ -77,6 +80,10 @@ void EpubReaderMenuActivity::loop() {
     if (selectedAction == MenuAction::AUTO_PAGE_TURN) {
       selectedPageTurnOption = (selectedPageTurnOption + 1) % pageTurnLabels.size();
       requestUpdate();
+      return;
+    }
+
+    if (selectedAction == MenuAction::SESSION_LENGTH) {
       return;
     }
 
@@ -165,6 +172,12 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
       const auto value = pageTurnLabels[selectedPageTurnOption];
       const auto width = renderer.getTextWidth(UI_10_FONT_ID, value);
       renderer.drawText(UI_10_FONT_ID, contentX + contentWidth - 20 - width, displayY, value, !isSelected);
+    }
+
+    if (menuItems[itemIndex].action == MenuAction::SESSION_LENGTH) {
+      const std::string sessionTime = ReadingStatsAnalytics::formatDurationHm(READING_STATS.getCurrentSessionMs());
+      const auto width = renderer.getTextWidth(UI_10_FONT_ID, sessionTime.c_str());
+      renderer.drawText(UI_10_FONT_ID, contentX + contentWidth - 20 - width, displayY, sessionTime.c_str(), !isSelected);
     }
   }
 

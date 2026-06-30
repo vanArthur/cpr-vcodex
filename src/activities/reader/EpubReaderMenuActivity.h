@@ -28,7 +28,8 @@ class EpubReaderMenuActivity final : public Activity {
     MARK_AS_FINISHED,
     GO_HOME,
     SYNC,
-    DELETE_CACHE
+    DELETE_CACHE,
+    SESSION_LENGTH
   };
 
   explicit EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title,

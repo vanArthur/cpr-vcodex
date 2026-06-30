@@ -1573,6 +1573,13 @@ uint64_t ReadingStatsStore::getTodayReadingMs() const {
   return summaryCache.todayReadingMs;
 }
 
+uint64_t ReadingStatsStore::getCurrentSessionMs() const {
+  if (!activeSession.active) {
+    return 0;
+  }
+  return activeSession.accumulatedMs;
+}
+
 uint64_t ReadingStatsStore::getRecentReadingMs(const uint32_t days) const {
   if (days == 0) {
     return 0;

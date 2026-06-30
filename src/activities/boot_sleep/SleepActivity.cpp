@@ -27,6 +27,7 @@
 #include "util/ReadingStatsAnalytics.h"
 #include "util/SleepImageUtils.h"
 #include "util/SleepScreenCache.h"
+#include "util/TimeUtils.h"
 
 namespace {
 bool canUseSleepCache(const Bitmap& bitmap) {
@@ -65,6 +66,28 @@ std::string formatBookTitleFromPath(const std::string& path) {
     name = name.substr(0, dot);
   }
   return name.empty() ? std::string(tr(STR_READING_TIME)) : name;
+}
+
+uint32_t getHeatmapReferenceDayOrdinal() {
+  const uint32_t now = static_cast<uint32_t>(time(nullptr));
+  if (TimeUtils::isClockValid(now)) {
+    return TimeUtils::getLocalDayOrdinal(now);
+  }
+
+  if (READING_STATS.hasReadingDays()) {
+    return READING_STATS.getReadingDays().back().dayOrdinal;
+  }
+
+  return 0;
+}
+
+uint64_t getReadingMsForDayOrdinal(const uint32_t dayOrdinal) {
+  for (const auto& day : READING_STATS.getReadingDays()) {
+    if (day.dayOrdinal == dayOrdinal) {
+      return day.readingMs;
+    }
+  }
+  return 0;
 }
 
 const ReadingBookStats* getCurrentSleepBook() {
@@ -673,6 +696,9 @@ void SleepActivity::onEnter() {
     case (CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM_STATS_V2):
       renderCustomStatsSleepScreen(true);
       break;
+    case (CrossPointSettings::SLEEP_SCREEN_MODE::READING_HEATMAP):
+      renderReadingHeatmapSleepScreen();
+      break;
     default:
       renderDefaultSleepScreen();
       break;
@@ -1072,6 +1098,48 @@ void SleepActivity::renderCustomStatsSleepScreen(bool footerOnly) const {
   }
 
   renderReadingDashboardSleepScreen();
+}
+
+void SleepActivity::renderReadingHeatmapSleepScreen() const {
+  const int screenW = renderer.getScreenWidth();
+  const int screenH = renderer.getScreenHeight();
+  const int cols = 14;
+  const int gap = 10;
+
+  const int cellSize = (screenW - (cols + 1) * gap) / cols;
+  const int rows = (screenH - gap) / (cellSize + gap);
+
+  const int gridWidth = cols * cellSize + (cols + 1) * gap;
+  const int gridHeight = rows * cellSize + (rows + 1) * gap;
+
+  const int offsetX = (screenW - gridWidth) / 2;
+  const int offsetY = (screenH - gridHeight) / 2;
+  const uint32_t referenceDayOrdinal = getHeatmapReferenceDayOrdinal();
+
+  renderer.clearScreen();
+
+  constexpr uint64_t GOAL_MS = 30ULL * 60ULL * 1000ULL;
+
+  for (int row = 0; row < rows; ++row) {
+    for (int col = 0; col < cols; ++col) {
+      const int x = offsetX + gap + col * (cellSize + gap);
+      const int y = offsetY + gap + row * (cellSize + gap);
+
+      const int dayIndex = row * cols + col;
+      const uint32_t dayOrdinal = referenceDayOrdinal >= static_cast<uint32_t>(dayIndex)
+                                      ? referenceDayOrdinal - static_cast<uint32_t>(dayIndex)
+                                      : 0;
+      const uint64_t readingMs = getReadingMsForDayOrdinal(dayOrdinal);
+
+      if (readingMs >= GOAL_MS) {
+        renderer.fillRect(x + 1, y + 1, std::max(0, cellSize - 2), std::max(0, cellSize - 2), true);
+      }
+
+      renderer.drawRect(x, y, cellSize, cellSize, true);
+    }
+  }
+
+  displaySleepBuffer(renderer);
 }
 
 void SleepActivity::renderBlankSleepScreen() const {
