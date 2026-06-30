@@ -9,7 +9,6 @@
 #include "BookmarksAppActivity.h"
 #include "DictionaryActivity.h"
 #include "FavoritesAppActivity.h"
-#include "FlashcardsAppActivity.h"
 #include "IfFoundActivity.h"
 #include "ReadingHeatmapActivity.h"
 #include "ReadingProfileActivity.h"
@@ -183,9 +182,6 @@ void AppsActivity::openSelectedApp() {
       break;
     case ShortcutId::Favorites:
       activity = std::make_unique<FavoritesAppActivity>(renderer, mappedInput);
-      break;
-    case ShortcutId::Flashcards:
-      activity = std::make_unique<FlashcardsAppActivity>(renderer, mappedInput);
       break;
     case ShortcutId::Dictionary:
       activity = std::make_unique<DictionaryActivity>(renderer, mappedInput);

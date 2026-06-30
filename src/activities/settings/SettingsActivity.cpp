@@ -37,7 +37,6 @@
 #include "activities/apps/AchievementsActivity.h"
 #include "activities/apps/BookmarksAppActivity.h"
 #include "activities/apps/FavoritesAppActivity.h"
-#include "activities/apps/FlashcardsAppActivity.h"
 #include "activities/apps/IfFoundActivity.h"
 #include "activities/apps/ReadingHeatmapActivity.h"
 #include "activities/apps/ReadingProfileActivity.h"
@@ -226,13 +225,7 @@ const std::vector<SettingInfo>& getDeviceOnlyAppSettings() {
       SettingInfo::Action(StrId::STR_SCREEN_CLEAN, SettingAction::ScreenClean),
       SettingInfo::Action(StrId::STR_SLEEP, SettingAction::SleepApp),
       SettingInfo::Action(StrId::STR_IF_FOUND_RETURN_ME, SettingAction::IfFound),
-      SettingInfo::Section(StrId::STR_FLASHCARDS),
-      SettingInfo::Action(StrId::STR_FLASHCARDS, SettingAction::Flashcards),
-      SettingInfo::Enum(StrId::STR_STUDY_MODE, &CrossPointSettings::flashcardStudyMode,
-                        {StrId::STR_DUE, StrId::STR_SCHEDULED, StrId::STR_RANDOM_PRACTICE, StrId::STR_SEQUENTIAL}),
-      SettingInfo::Enum(StrId::STR_SESSION_SIZE, &CrossPointSettings::flashcardSessionSize,
-                        {StrId::STR_NUM_10, StrId::STR_NUM_20, StrId::STR_NUM_30, StrId::STR_NUM_50, StrId::STR_ALL}),
-      SettingInfo::Section(StrId::STR_SHORTCUTS_SECTION),
+     SettingInfo::Section(StrId::STR_SHORTCUTS_SECTION),
       SettingInfo::Action(StrId::STR_SHORTCUT_LOCATION, SettingAction::ShortcutLocation),
       SettingInfo::Action(StrId::STR_SHORTCUT_VISIBILITY, SettingAction::ShortcutVisibility),
       SettingInfo::Action(StrId::STR_ORDER_HOME_SHORTCUTS, SettingAction::OrderHomeShortcuts),
@@ -367,10 +360,6 @@ std::string getSettingValueText(const SettingInfo& setting) {
       }
       case SettingAction::Achievements: {
         const auto* definition = findShortcutDefinition(ShortcutId::Achievements);
-        return definition ? ShortcutUiMetadata::getSubtitle(*definition) : "";
-      }
-      case SettingAction::Flashcards: {
-        const auto* definition = findShortcutDefinition(ShortcutId::Flashcards);
         return definition ? ShortcutUiMetadata::getSubtitle(*definition) : "";
       }
       case SettingAction::ScreenClean: {
@@ -786,9 +775,6 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::Favorites:
         startActivityForResult(std::make_unique<FavoritesAppActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::Flashcards:
-        startActivityForResult(std::make_unique<FlashcardsAppActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::ScreenClean:
         startActivityForResult(std::make_unique<ScreenCleanActivity>(renderer, mappedInput), resultHandler);
