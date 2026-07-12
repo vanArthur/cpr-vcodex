@@ -11,7 +11,7 @@
 #include "parsers/ChapterHtmlSlimParser.h"
 
 namespace {
-constexpr uint8_t SECTION_FILE_VERSION = 30;
+constexpr uint8_t SECTION_FILE_VERSION = 35;
 constexpr uint32_t HEADER_SIZE = sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(bool) +
                                  sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint16_t) +
                                  sizeof(bool) + sizeof(bool) + sizeof(bool) + sizeof(uint8_t) + sizeof(uint32_t) +
@@ -32,6 +32,10 @@ uint32_t Section::onPageComplete(std::unique_ptr<Page> page) {
     LOG_ERR("SCT", "File not open for writing page %d", pageCount);
     return 0;
   }
+  if (!page) {
+    LOG_ERR("SCT", "Null page for page %d", pageCount);
+    return 0;
+  }
 
   const uint32_t position = file.position();
   if (!page->serialize(file)) {
@@ -48,8 +52,7 @@ void Section::writeSectionFileHeader(const int fontId, const float lineCompressi
                                      const bool forceParagraphIndents, const uint8_t paragraphAlignment,
                                      const uint16_t viewportWidth, const uint16_t viewportHeight,
                                      const bool hyphenationEnabled, const bool focusReadingEnabled,
-                                     const bool embeddedStyle,
-                                     const uint8_t imageRendering) {
+                                     const bool embeddedStyle, const uint8_t imageRendering) {
   if (!file) {
     LOG_DBG("SCT", "File not open for writing header");
     return;
@@ -82,8 +85,8 @@ void Section::writeSectionFileHeader(const int fontId, const float lineCompressi
 bool Section::loadSectionFile(const int fontId, const float lineCompression, const bool extraParagraphSpacing,
                               const bool forceParagraphIndents, const uint8_t paragraphAlignment,
                               const uint16_t viewportWidth, const uint16_t viewportHeight,
-                              const bool hyphenationEnabled, const bool focusReadingEnabled,
-                              const bool embeddedStyle, const uint8_t imageRendering) {
+                              const bool hyphenationEnabled, const bool focusReadingEnabled, const bool embeddedStyle,
+                              const uint8_t imageRendering) {
   if (!Storage.openFileForRead("SCT", filePath, file)) {
     return false;
   }
@@ -162,9 +165,8 @@ bool Section::clearCache() const {
 bool Section::createSectionFile(const int fontId, const float lineCompression, const bool extraParagraphSpacing,
                                 const bool forceParagraphIndents, const uint8_t paragraphAlignment,
                                 const uint16_t viewportWidth, const uint16_t viewportHeight,
-                                const bool hyphenationEnabled, const bool focusReadingEnabled,
-                                const bool embeddedStyle, const uint8_t imageRendering,
-                                const std::function<void()>& popupFn) {
+                                const bool hyphenationEnabled, const bool focusReadingEnabled, const bool embeddedStyle,
+                                const uint8_t imageRendering, const std::function<void()>& popupFn) {
   const auto localPath = epub->getSpineItem(spineIndex).href;
   const auto tmpHtmlPath = epub->getCachePath() + "/.tmp_" + std::to_string(spineIndex) + ".html";
 
@@ -333,12 +335,38 @@ std::unique_ptr<Page> Section::loadPageFromSectionFile() {
     return nullptr;
   }
 
+  if (currentPage < 0 || currentPage >= pageCount) {
+    LOG_ERR("SCT", "Page load out of bounds: %d/%u", currentPage, pageCount);
+    file.close();
+    return nullptr;
+  }
+
+  const uint32_t fileSize = file.size();
   file.seek(HEADER_SIZE - sizeof(uint32_t) * 3);
   uint32_t lutOffset;
   serialization::readPod(file, lutOffset);
-  file.seek(lutOffset + sizeof(uint32_t) * currentPage);
+  if (lutOffset == 0 || lutOffset >= fileSize) {
+    LOG_ERR("SCT", "Invalid LUT offset: %u size=%u", lutOffset, fileSize);
+    file.close();
+    return nullptr;
+  }
+
+  const uint32_t lutEntryOffset = lutOffset + sizeof(uint32_t) * static_cast<uint32_t>(currentPage);
+  if (lutEntryOffset + sizeof(uint32_t) > fileSize) {
+    LOG_ERR("SCT", "Invalid LUT entry offset: %u size=%u", lutEntryOffset, fileSize);
+    file.close();
+    return nullptr;
+  }
+
+  file.seek(lutEntryOffset);
   uint32_t pagePos;
   serialization::readPod(file, pagePos);
+  if (pagePos < HEADER_SIZE || pagePos >= lutOffset || pagePos >= fileSize) {
+    LOG_ERR("SCT", "Invalid page offset: %u lut=%u size=%u", pagePos, lutOffset, fileSize);
+    file.close();
+    return nullptr;
+  }
+
   file.seek(pagePos);
 
   auto page = Page::deserialize(file);
