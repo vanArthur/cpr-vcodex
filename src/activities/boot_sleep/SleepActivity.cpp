@@ -107,6 +107,15 @@ uint32_t getHeatmapReferenceDayOrdinal() {
     return TimeUtils::getLocalDayOrdinal(now);
   }
 
+  if (TimeUtils::isClockValid(APP_STATE.lastKnownValidTimestamp)) {
+    return TimeUtils::getLocalDayOrdinal(APP_STATE.lastKnownValidTimestamp);
+  }
+
+  const uint32_t displayTimestamp = READING_STATS.getDisplayTimestamp();
+  if (TimeUtils::isClockValid(displayTimestamp)) {
+    return TimeUtils::getLocalDayOrdinal(displayTimestamp);
+  }
+
   if (READING_STATS.hasReadingDays()) {
     return READING_STATS.getReadingDays().back().dayOrdinal;
   }
