@@ -1143,8 +1143,8 @@ void SleepActivity::renderReadingHeatmapSleepScreen() const {
   const std::string bookTitle = getCurrentBookTitle();
   const std::string bookProgress = formatPercent(getCurrentBookProgress());
   const std::string todayReading = ReadingStatsAnalytics::formatDurationHm(READING_STATS.getTodayReadingMs());
-  const std::string bottomText = !bookTitle.empty() ? bookTitle + " (" + bookProgress + ")" : bookProgress + " | " + todayReading;
   if (!bookTitle.empty()) {
+    const std::string bottomText = bookTitle + " (" + bookProgress + ")" + " | " + todayReading;
     const int titleY = gridBottom + (screenH - gridBottom - 40) / 2;
     renderer.drawCenteredText(SMALL_FONT_ID, titleY, bottomText.c_str());
   }
