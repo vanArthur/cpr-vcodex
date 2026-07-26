@@ -26,10 +26,12 @@
 #include "util/TimeZoneRegistry.h"
 
 namespace {
-constexpr uint8_t FONT_FAMILY_SCHEMA_VERSION = 2;
+constexpr uint8_t FONT_FAMILY_SCHEMA_VERSION = 3;
 constexpr uint8_t FONT_SIZE_SCHEMA_VERSION = 2;
 constexpr uint8_t UI_THEME_SCHEMA_VERSION = 3;
 constexpr uint8_t TEXT_DARKNESS_SCHEMA_VERSION = 2;
+constexpr uint8_t LEGACY_LEXEND_FONT_FAMILY = 2;
+constexpr char LEXEND_SD_FAMILY_NAME[] = "Lexend";
 
 class HalFileStream : public Stream {
  public:
@@ -72,6 +74,12 @@ bool saveJsonDocumentToFile(const char* moduleName, const char* path, const Json
     return false;
   }
 
+  if (doc.overflowed()) {
+    LOG_ERR(moduleName, "JSON document overflowed before write: %s", targetPath.c_str());
+    CPR_VCODEX_LOG_EVENT(moduleName, std::string("Refused to write overflowed JSON document: ") + targetPath);
+    return false;
+  }
+
   if (Storage.exists(tempPath.c_str())) {
     Storage.remove(tempPath.c_str());
   }
@@ -83,12 +91,16 @@ bool saveJsonDocumentToFile(const char* moduleName, const char* path, const Json
     return false;
   }
 
+  const size_t expected = measureJson(doc);
   const size_t written = serializeJson(doc, file);
   file.flush();
   file.close();
-  if (written == 0) {
+  if (written == 0 || written != expected) {
     Storage.remove(tempPath.c_str());
-    CPR_VCODEX_LOG_EVENT(moduleName, std::string("serializeJson wrote 0 bytes for ") + targetPath);
+    LOG_ERR(moduleName, "Incomplete JSON write for %s: %u/%u bytes", targetPath.c_str(),
+            static_cast<unsigned>(written), static_cast<unsigned>(expected));
+    CPR_VCODEX_LOG_EVENT(moduleName, std::string("Incomplete JSON write for ") + targetPath + ": " +
+                                         std::to_string(written) + "/" + std::to_string(expected) + " bytes");
     return false;
   }
 
@@ -122,11 +134,12 @@ bool loadJsonDocumentFromFile(const char* moduleName, const char* path, JsonDocu
   HalFileStream stream(file);
   auto error = deserializeJson(doc, stream);
   file.close();
-  if (error) {
-    LOG_ERR(moduleName, "JSON parse error: %s", error.c_str());
+  if (error || doc.overflowed()) {
+    const char* message = error ? error.c_str() : "document overflow";
+    LOG_ERR(moduleName, "JSON parse error: %s", message);
 #ifndef CPR_DISABLE_EVENT_LOGS
     const std::string reportBody =
-        std::string("File: ") + path + "\nModule: " + moduleName + "\nError: " + error.c_str() + "\n";
+        std::string("File: ") + path + "\nModule: " + moduleName + "\nError: " + message + "\n";
     std::string outPath;
     if (CPR_VCODEX_WRITE_REPORT("json_error", reportBody, &outPath)) {
       CPR_VCODEX_LOG_EVENT(moduleName, std::string("Saved JSON parse error report to ") + outPath);
@@ -243,6 +256,31 @@ void applyLegacyStatusBarSettings(CrossPointSettings& settings) {
   }
 }
 
+namespace {
+void migrateDisplayHeaderSettings(CrossPointSettings& s, const JsonDocument& doc, bool* needsResave) {
+  if (doc["displayHeaderTime"].isNull()) {
+    return;
+  }
+
+  const uint8_t headerTime = doc["displayHeaderTime"] | static_cast<uint8_t>(0);
+  if (headerTime > 1) {
+    return;
+  }
+
+  if (headerTime) {
+    if (s.displayDay == CrossPointSettings::DISPLAY_HEADER_OFF) {
+      s.displayDay = CrossPointSettings::DISPLAY_HEADER_TIME_ONLY;
+    } else if (s.displayDay == CrossPointSettings::DISPLAY_HEADER_DATE_ONLY) {
+      s.displayDay = CrossPointSettings::DISPLAY_HEADER_BOTH;
+    }
+  }
+
+  if (needsResave) {
+    *needsResave = true;
+  }
+}
+}  // namespace
+
 bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* needsResave) {
   auto clamp = [](uint8_t val, uint8_t maxVal, uint8_t def) -> uint8_t { return val < maxVal ? val : def; };
   auto loadToggle = [&](const char* key, uint8_t& field) {
@@ -285,14 +323,24 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
   loadToggle("darkMode", s.darkMode);
   loadToggle("antiGhostingExperimental", s.antiGhostingExperimental);
 
+  loadString("sdFontFamilyName", s.sdFontFamilyName, sizeof(s.sdFontFamilyName));
   const uint8_t rawFontFamily = doc["fontFamily"] | s.fontFamily;
-  if (rawFontFamily >= static_cast<uint8_t>(CrossPointSettings::FONT_FAMILY_COUNT)) {
+  const uint8_t fontFamilySchemaVersion = doc["fontFamilySchemaVersion"] | static_cast<uint8_t>(0);
+  if (fontFamilySchemaVersion < FONT_FAMILY_SCHEMA_VERSION && rawFontFamily == LEGACY_LEXEND_FONT_FAMILY &&
+      s.sdFontFamilyName[0] == '\0') {
+    s.fontFamily = CrossPointSettings::BOOKERLY;
+    strncpy(s.sdFontFamilyName, LEXEND_SD_FAMILY_NAME, sizeof(s.sdFontFamilyName) - 1);
+    s.sdFontFamilyName[sizeof(s.sdFontFamilyName) - 1] = '\0';
+    if (needsResave) *needsResave = true;
+  } else if (rawFontFamily >= static_cast<uint8_t>(CrossPointSettings::FONT_FAMILY_COUNT)) {
     s.fontFamily = CrossPointSettings::BOOKERLY;
     if (needsResave) *needsResave = true;
   } else {
     s.fontFamily = rawFontFamily;
   }
-  loadString("sdFontFamilyName", s.sdFontFamilyName, sizeof(s.sdFontFamilyName));
+  if (fontFamilySchemaVersion < FONT_FAMILY_SCHEMA_VERSION && needsResave) {
+    *needsResave = true;
+  }
 
   loadEnum("fontSize", s.fontSize, CrossPointSettings::FONT_SIZE_COUNT);
   const uint8_t fontSizeSchemaVersion = doc["fontSizeSchemaVersion"] | static_cast<uint8_t>(0);
@@ -384,6 +432,9 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
   loadEnum("statusBarTitle", s.statusBarTitle, CrossPointSettings::STATUS_BAR_TITLE_COUNT);
   loadToggle("statusBarBattery", s.statusBarBattery);
   loadEnum("xtcStatusBarMode", s.xtcStatusBarMode, CrossPointSettings::XTC_STATUS_BAR_MODE_COUNT);
+  loadEnum("statusBarClock", s.statusBarClock, CrossPointSettings::STATUS_BAR_CLOCK_COUNT);
+  loadEnum("clockFormat", s.clockFormat, static_cast<uint8_t>(2));
+  loadToggle("clockHasBeenSynced", s.clockHasBeenSynced);
 
   using S = CrossPointSettings;
   s.frontButtonBack =
@@ -395,7 +446,8 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
   s.frontButtonRight =
       clamp(doc["frontButtonRight"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
   s.homeBookSource = clamp(doc["homeBookSource"] | s.homeBookSource, S::HOME_BOOK_SOURCE_COUNT, s.homeBookSource);
-  s.displayDay = clamp(doc["displayDay"] | s.displayDay, static_cast<uint8_t>(2), s.displayDay);
+  s.displayDay = clamp(doc["displayDay"] | s.displayDay, S::DISPLAY_HEADER_MODE_COUNT, s.displayDay);
+  migrateDisplayHeaderSettings(s, doc, needsResave);
   s.autoSyncDay = clamp(doc["autoSyncDay"] | s.autoSyncDay, static_cast<uint8_t>(2), s.autoSyncDay);
   s.syncDayWifiChoice =
       clamp(doc["syncDayWifiChoice"] | s.syncDayWifiChoice, S::SYNC_DAY_WIFI_CHOICE_COUNT, s.syncDayWifiChoice);
@@ -534,6 +586,7 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
   migrateLegacyStatsShortcut(s, doc, needsResave);
   normalizeShortcutOrderSettings(s);
   CrossPointSettings::validateFrontButtonMapping(s);
+  s.normalizeDisplayDay();
 
   LOG_DBG("CPS", "Settings loaded from file");
   return true;
@@ -731,6 +784,9 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["statusBarTitle"] = s.statusBarTitle;
   doc["statusBarBattery"] = s.statusBarBattery;
   doc["xtcStatusBarMode"] = s.xtcStatusBarMode;
+  doc["statusBarClock"] = s.statusBarClock;
+  doc["clockFormat"] = s.clockFormat;
+  doc["clockHasBeenSynced"] = s.clockHasBeenSynced;
 
   // Front button remap - managed by RemapFrontButtons sub-activity, not in SettingsList.
   doc["frontButtonBack"] = s.frontButtonBack;
@@ -890,7 +946,8 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
       clamp(doc["frontButtonLeft"] | (uint8_t)S::FRONT_HW_LEFT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_LEFT);
   s.frontButtonRight =
       clamp(doc["frontButtonRight"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
-  s.displayDay = clamp(doc["displayDay"] | s.displayDay, static_cast<uint8_t>(2), s.displayDay);
+  s.displayDay = clamp(doc["displayDay"] | s.displayDay, S::DISPLAY_HEADER_MODE_COUNT, s.displayDay);
+  migrateDisplayHeaderSettings(s, doc, needsResave);
   s.autoSyncDay = clamp(doc["autoSyncDay"] | s.autoSyncDay, static_cast<uint8_t>(2), s.autoSyncDay);
   s.syncDayWifiChoice =
       clamp(doc["syncDayWifiChoice"] | s.syncDayWifiChoice, S::SYNC_DAY_WIFI_CHOICE_COUNT, s.syncDayWifiChoice);
@@ -1034,10 +1091,20 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
 
 bool JsonSettingsIO::saveKOReader(const KOReaderCredentialStore& store, const char* path) {
   JsonDocument doc;
-  doc["username"] = store.getUsername();
-  doc["password_obf"] = obfuscation::obfuscateToBase64(store.getPassword());
-  doc["serverUrl"] = store.getServerUrl();
-  doc["matchMethod"] = static_cast<uint8_t>(store.getMatchMethod());
+
+  JsonArray arr = doc["profiles"].to<JsonArray>();
+  for (const auto& profile : store.profiles) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["name"] = profile.name;
+    obj["username"] = profile.username;
+    obj["password_obf"] = obfuscation::obfuscateToBase64(profile.password);
+    obj["serverUrl"] = profile.serverUrl;
+    obj["matchMethod"] = static_cast<uint8_t>(profile.matchMethod);
+    obj["sendMetadata"] = profile.sendMetadata;
+    obj["syncBehavior"] = static_cast<uint8_t>(profile.syncBehavior);
+  }
+  doc["activeIndex"] = store.activeIndex;
+
   return saveJsonDocumentToFile("KRS", path, doc);
 }
 
@@ -1051,18 +1118,113 @@ bool JsonSettingsIO::loadKOReader(KOReaderCredentialStore& store, const char* js
     return false;
   }
 
-  store.username = doc["username"] | std::string("");
-  bool ok = false;
-  store.password = obfuscation::deobfuscateFromBase64(doc["password_obf"] | "", &ok);
-  if (!ok || store.password.empty()) {
-    store.password = doc["password"] | std::string("");
-    if (!store.password.empty() && needsResave) *needsResave = true;
-  }
-  store.serverUrl = doc["serverUrl"] | std::string("");
-  uint8_t method = doc["matchMethod"] | (uint8_t)0;
-  store.matchMethod = static_cast<DocumentMatchMethod>(method);
+  if (!doc["profiles"].isNull()) {
+    // Current multi-profile format.
+    store.profiles.clear();
+    JsonArray arr = doc["profiles"].as<JsonArray>();
+    for (JsonObject obj : arr) {
+      if (store.profiles.size() >= KOReaderCredentialStore::MAX_PROFILES) break;
+      KOReaderProfile profile;
+      profile.name = obj["name"] | std::string("");
+      profile.username = obj["username"] | std::string("");
+      bool ok = false;
+      profile.password = obfuscation::deobfuscateFromBase64(obj["password_obf"] | "", &ok);
+      if (!ok || profile.password.empty()) {
+        profile.password = obj["password"] | std::string("");
+        if (!profile.password.empty() && needsResave) *needsResave = true;
+      }
+      profile.serverUrl = obj["serverUrl"] | std::string("");
+      uint8_t method = obj["matchMethod"] | (uint8_t)0;
+      profile.matchMethod = method <= static_cast<uint8_t>(DocumentMatchMethod::BINARY)
+                                ? static_cast<DocumentMatchMethod>(method)
+                                : DocumentMatchMethod::FILENAME;
+      profile.sendMetadata = obj["sendMetadata"] | false;
+      const uint8_t behavior = obj["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME);
+      profile.syncBehavior = behavior <= static_cast<uint8_t>(KOReaderSyncBehavior::SMART)
+                                 ? static_cast<KOReaderSyncBehavior>(behavior)
+                                 : KOReaderSyncBehavior::ASK_EVERY_TIME;
+      store.profiles.push_back(std::move(profile));
+    }
+    const int active = doc["activeIndex"] | 0;
+    store.activeIndex = (active >= 0 && static_cast<size_t>(active) < store.profiles.size())
+                            ? active
+                            : (store.profiles.empty() ? -1 : 0);
+  } else {
+    // Legacy single-record format written before multi-profile support -- wrap it
+    // into a single "Profile 1" and flag for resave so the file upgrades on disk.
+    KOReaderProfile profile;
+    profile.name = "Profile 1";
+    profile.username = doc["username"] | std::string("");
+    bool ok = false;
+    profile.password = obfuscation::deobfuscateFromBase64(doc["password_obf"] | "", &ok);
+    if (!ok || profile.password.empty()) {
+      profile.password = doc["password"] | std::string("");
+    }
+    profile.serverUrl = doc["serverUrl"] | std::string("");
+    const uint8_t method = doc["matchMethod"] | static_cast<uint8_t>(DocumentMatchMethod::FILENAME);
+    profile.matchMethod = method <= static_cast<uint8_t>(DocumentMatchMethod::BINARY)
+                              ? static_cast<DocumentMatchMethod>(method)
+                              : DocumentMatchMethod::FILENAME;
+    profile.sendMetadata = doc["sendMetadata"] | false;
+    const uint8_t behavior =
+        doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME);
+    profile.syncBehavior = behavior <= static_cast<uint8_t>(KOReaderSyncBehavior::SMART)
+                               ? static_cast<KOReaderSyncBehavior>(behavior)
+                               : KOReaderSyncBehavior::ASK_EVERY_TIME;
 
-  LOG_DBG("KRS", "Loaded KOReader credentials for user: %s", store.username.c_str());
+    store.profiles.clear();
+    store.profiles.push_back(std::move(profile));
+    store.activeIndex = 0;
+    if (needsResave) *needsResave = true;
+  }
+
+  LOG_DBG("KRS", "Loaded %zu KOReader profile(s), active index %d", store.profiles.size(), store.activeIndex);
+  return true;
+}
+
+// Legacy single-record mirror (koreader.json's original shape). Kept in sync with
+// whichever profile is active so other firmware sharing the same SD card (e.g. stock
+// crosspoint-reader, which only ever understood one KOReader account) keeps working
+// unchanged -- it never sees the multi-profile store and has no reason to.
+bool JsonSettingsIO::saveKOReaderLegacyMirror(const KOReaderCredentialStore& store, const char* path) {
+  JsonDocument doc;
+  doc["username"] = store.getUsername();
+  doc["password_obf"] = obfuscation::obfuscateToBase64(store.getPassword());
+  doc["serverUrl"] = store.getServerUrl();
+  doc["matchMethod"] = static_cast<uint8_t>(store.getMatchMethod());
+  doc["sendMetadata"] = store.getSendMetadata();
+  doc["syncBehavior"] = static_cast<uint8_t>(store.getSyncBehavior());
+  return saveJsonDocumentToFile("KRS", path, doc);
+}
+
+bool JsonSettingsIO::loadKOReaderLegacyProfile(KOReaderProfile& profile, const char* json) {
+  JsonDocument doc;
+  auto error = deserializeJson(doc, json);
+  if (error) {
+    LOG_ERR("KRS", "Legacy koreader.json parse error: %s", error.c_str());
+    CPR_VCODEX_LOG_EVENT("KRS", std::string("Legacy koreader.json parse error: ") + error.c_str());
+    return false;
+  }
+
+  profile.username = doc["username"] | std::string("");
+  bool ok = false;
+  profile.password = obfuscation::deobfuscateFromBase64(doc["password_obf"] | "", &ok);
+  if (!ok || profile.password.empty()) {
+    profile.password = doc["password"] | std::string("");
+  }
+  profile.serverUrl = doc["serverUrl"] | std::string("");
+  const uint8_t method = doc["matchMethod"] | static_cast<uint8_t>(DocumentMatchMethod::FILENAME);
+  profile.matchMethod = method <= static_cast<uint8_t>(DocumentMatchMethod::BINARY)
+                            ? static_cast<DocumentMatchMethod>(method)
+                            : DocumentMatchMethod::FILENAME;
+  profile.sendMetadata = doc["sendMetadata"] | false;
+  const uint8_t behavior =
+      doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME);
+  profile.syncBehavior = behavior <= static_cast<uint8_t>(KOReaderSyncBehavior::SMART)
+                             ? static_cast<KOReaderSyncBehavior>(behavior)
+                             : KOReaderSyncBehavior::ASK_EVERY_TIME;
+
+  LOG_DBG("KRS", "Loaded legacy KOReader credentials for user: %s", profile.username.c_str());
   return true;
 }
 
@@ -1273,13 +1435,53 @@ bool JsonSettingsIO::saveReadingStats(const ReadingStatsStore& store, const char
   return saveJsonDocumentToFile("RST", path, doc);
 }
 
-bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json) {
-  JsonDocument doc;
-  auto error = deserializeJson(doc, json);
-  if (error) {
-    LOG_ERR("RST", "JSON parse error: %s", error.c_str());
-    CPR_VCODEX_LOG_EVENT("RST", std::string("Reading stats JSON parse error: ") + error.c_str());
+bool JsonSettingsIO::loadReadingStatsDocument(ReadingStatsStore& store, const JsonDocument& doc) {
+  if (!doc.is<JsonObject>()) {
+    CPR_VCODEX_LOG_EVENT("RST", "Reading stats root is not a JSON object");
     return false;
+  }
+
+  const JsonVariantConst formatValue = doc["formatVersion"];
+  if (!formatValue.isNull() && !formatValue.is<uint32_t>()) {
+    CPR_VCODEX_LOG_EVENT("RST", "Reading stats formatVersion is not an unsigned integer");
+    return false;
+  }
+  const uint32_t formatVersion = formatValue | static_cast<uint32_t>(1);
+  if (formatVersion == 0 || formatVersion > 6) {
+    CPR_VCODEX_LOG_EVENT("RST", std::string("Unsupported reading stats formatVersion: ") +
+                                   std::to_string(formatVersion));
+    return false;
+  }
+
+  static constexpr const char* ARRAY_KEYS[] = {"readingDays", "legacyReadingDays", "sessionLog", "books"};
+  for (const char* key : ARRAY_KEYS) {
+    const JsonVariantConst value = doc[key];
+    if ((!value.isNull() || formatVersion >= 6) && !value.is<JsonArray>()) {
+      CPR_VCODEX_LOG_EVENT("RST", std::string("Reading stats field is not an array: ") + key);
+      return false;
+    }
+  }
+
+  for (JsonVariantConst value : doc["books"].as<JsonArrayConst>()) {
+    if (!value.is<JsonObject>()) {
+      CPR_VCODEX_LOG_EVENT("RST", "Reading stats books contains a non-object entry");
+      return false;
+    }
+    const JsonObjectConst obj = value.as<JsonObjectConst>();
+    if (!obj["knownPaths"].isNull() && !obj["knownPaths"].is<JsonArray>()) {
+      CPR_VCODEX_LOG_EVENT("RST", "Reading stats knownPaths is not an array");
+      return false;
+    }
+    if (formatVersion >= 2 && !obj["readingDays"].isNull() && !obj["readingDays"].is<JsonArray>()) {
+      CPR_VCODEX_LOG_EVENT("RST", "Reading stats book readingDays is not an array");
+      return false;
+    }
+  }
+  for (JsonVariantConst value : doc["sessionLog"].as<JsonArrayConst>()) {
+    if (!value.is<JsonObject>()) {
+      CPR_VCODEX_LOG_EVENT("RST", "Reading stats sessionLog contains a non-object entry");
+      return false;
+    }
   }
 
   store.books.clear();
@@ -1288,13 +1490,11 @@ bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json
   store.sessionLog.clear();
   store.dirty = false;
 
-  const uint32_t formatVersion = doc["formatVersion"] | static_cast<uint32_t>(1);
-
-  auto appendReadingDays = [](std::vector<ReadingDayStats>& destination, JsonArray source) {
-    for (JsonVariant value : source) {
+  auto appendReadingDays = [](std::vector<ReadingDayStats>& destination, JsonArrayConst source) {
+    for (JsonVariantConst value : source) {
       ReadingDayStats day;
       if (value.is<JsonObject>()) {
-        JsonObject obj = value.as<JsonObject>();
+        JsonObjectConst obj = value.as<JsonObjectConst>();
         day.dayOrdinal = obj["dayOrdinal"] | static_cast<uint32_t>(0);
         day.readingMs = obj["readingMs"] | static_cast<uint64_t>(0);
       } else {
@@ -1307,9 +1507,10 @@ bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json
     }
   };
 
-  appendReadingDays(store.readingDays, doc["readingDays"].as<JsonArray>());
+  appendReadingDays(store.readingDays, doc["readingDays"].as<JsonArrayConst>());
+  std::vector<ReadingDayStats> declaredReadingDays = store.readingDays;
   if (formatVersion >= 2) {
-    appendReadingDays(store.legacyReadingDays, doc["legacyReadingDays"].as<JsonArray>());
+    appendReadingDays(store.legacyReadingDays, doc["legacyReadingDays"].as<JsonArrayConst>());
     if (formatVersion < 6 && store.legacyReadingDays.empty()) {
       store.legacyReadingDays = store.readingDays;
     }
@@ -1318,7 +1519,7 @@ bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json
   }
 
   if (formatVersion >= 4) {
-    for (JsonObject sessionObj : doc["sessionLog"].as<JsonArray>()) {
+    for (JsonObjectConst sessionObj : doc["sessionLog"].as<JsonArrayConst>()) {
       ReadingSessionLogEntry session;
       session.dayOrdinal = sessionObj["dayOrdinal"] | static_cast<uint32_t>(0);
       session.sessionMs = sessionObj["sessionMs"] | static_cast<uint32_t>(0);
@@ -1332,15 +1533,15 @@ bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json
     store.dirty = true;
   }
 
-  JsonArray books = doc["books"].as<JsonArray>();
-  for (JsonObject obj : books) {
+  JsonArrayConst books = doc["books"].as<JsonArrayConst>();
+  for (JsonObjectConst obj : books) {
     ReadingBookStats book;
     book.bookId = obj["bookId"] | std::string("");
     book.path = obj["path"] | std::string("");
     if (book.path.empty()) {
       continue;
     }
-    for (JsonVariant value : obj["knownPaths"].as<JsonArray>()) {
+    for (JsonVariantConst value : obj["knownPaths"].as<JsonArrayConst>()) {
       const std::string knownPath = value | std::string("");
       if (!knownPath.empty()) {
         book.knownPaths.push_back(knownPath);
@@ -1360,7 +1561,7 @@ bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json
     book.chapterProgressPercent = obj["chapterProgressPercent"] | static_cast<uint8_t>(0);
     book.completed = obj["completed"] | false;
     if (formatVersion >= 2) {
-      appendReadingDays(book.readingDays, obj["readingDays"].as<JsonArray>());
+      appendReadingDays(book.readingDays, obj["readingDays"].as<JsonArrayConst>());
     }
     if (formatVersion < 3 || book.bookId.empty()) {
       store.dirty = true;
@@ -1373,20 +1574,71 @@ bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json
     store.dirty = true;
   }
   store.rebuildAggregatedReadingDays();
+
+  if (formatVersion >= 6) {
+    auto normalizeDays = [](std::vector<ReadingDayStats>& days) {
+      std::sort(days.begin(), days.end(), [](const ReadingDayStats& left, const ReadingDayStats& right) {
+        return left.dayOrdinal < right.dayOrdinal;
+      });
+      size_t writeIndex = 0;
+      for (const auto& day : days) {
+        if (day.dayOrdinal == 0 || day.readingMs == 0) {
+          continue;
+        }
+        if (writeIndex > 0 && days[writeIndex - 1].dayOrdinal == day.dayOrdinal) {
+          days[writeIndex - 1].readingMs += day.readingMs;
+        } else {
+          days[writeIndex++] = day;
+        }
+      }
+      days.resize(writeIndex);
+    };
+    normalizeDays(declaredReadingDays);
+    const bool aggregatesMatch = declaredReadingDays.size() == store.readingDays.size() &&
+                                 std::equal(declaredReadingDays.begin(), declaredReadingDays.end(),
+                                            store.readingDays.begin(), [](const ReadingDayStats& left,
+                                                                         const ReadingDayStats& right) {
+                                              return left.dayOrdinal == right.dayOrdinal &&
+                                                     left.readingMs == right.readingMs;
+                                            });
+    if (!aggregatesMatch) {
+      store.books.clear();
+      store.legacyReadingDays.clear();
+      store.readingDays.clear();
+      store.sessionLog.clear();
+      store.dirty = false;
+      CPR_VCODEX_LOG_EVENT("RST", "Reading stats aggregate totals do not match per-book data");
+      return false;
+    }
+  }
+
+  std::stable_sort(store.sessionLog.begin(), store.sessionLog.end(),
+                   [](const ReadingSessionLogEntry& left, const ReadingSessionLogEntry& right) {
+                     return left.dayOrdinal < right.dayOrdinal;
+                   });
   LOG_DBG("RST", "Reading stats loaded from file (%d books)", static_cast<int>(store.books.size()));
   return true;
+}
+
+bool JsonSettingsIO::loadReadingStats(ReadingStatsStore& store, const char* json) {
+  JsonDocument doc;
+  auto error = deserializeJson(doc, json);
+  if (error || doc.overflowed()) {
+    const char* message = error ? error.c_str() : "document overflow";
+    LOG_ERR("RST", "JSON parse error: %s", message);
+    CPR_VCODEX_LOG_EVENT("RST", std::string("Reading stats JSON parse error: ") + message);
+    return false;
+  }
+  return loadReadingStatsDocument(store, doc);
 }
 
 bool JsonSettingsIO::loadReadingStatsFromFile(ReadingStatsStore& store, const char* path) {
   if (!Storage.exists(path)) {
     return false;
   }
-  const String json = Storage.readFile(path);
-  if (json.isEmpty()) {
-    CPR_VCODEX_LOG_EVENT("RST", std::string("Reading stats file empty or unreadable: ") + path);
-    return false;
-  }
-  const bool loaded = loadReadingStats(store, json.c_str());
+  JsonDocument doc;
+  const bool parsed = loadJsonDocumentFromFile("RST", path, doc);
+  const bool loaded = parsed && !doc.overflowed() && loadReadingStatsDocument(store, doc);
   if (!loaded) {
     CPR_VCODEX_LOG_EVENT("RST", std::string("Failed to load reading stats from ") + path);
   }

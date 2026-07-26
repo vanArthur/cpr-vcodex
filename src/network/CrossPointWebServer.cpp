@@ -2,15 +2,19 @@
 
 #include <ArduinoJson.h>
 #include <FsHelpers.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <WiFi.h>
+#include <esp_efuse.h>
+#include <esp_efuse_table.h>
 #include <esp_task_wdt.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -248,7 +252,7 @@ constexpr StrId OPT_HIDE_BATTERY[] = {StrId::STR_NEVER, StrId::STR_IN_READER, St
 constexpr StrId OPT_REFRESH_FREQ[] = {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15,
                                       StrId::STR_PAGES_30};
 constexpr StrId OPT_UI_THEME[] = {StrId::STR_THEME_LYRA, StrId::STR_THEME_LYRA_CUSTOM, StrId::STR_THEME_LYRA_CAROUSEL};
-constexpr StrId OPT_FONT_FAMILY[] = {StrId::STR_BOOKERLY, StrId::STR_NOTO_SANS, StrId::STR_LEXEND};
+constexpr StrId OPT_FONT_FAMILY[] = {StrId::STR_BOOKERLY, StrId::STR_NOTO_SANS};
 constexpr StrId OPT_FONT_SIZE[] = {StrId::STR_X_SMALL, StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE,
                                    StrId::STR_X_LARGE};
 constexpr StrId OPT_LINE_SPACING[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE};
@@ -269,6 +273,8 @@ constexpr StrId OPT_SHORT_PWR[] = {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::S
 constexpr StrId OPT_TILT_PAGE_TURN[] = {StrId::STR_STATE_OFF, StrId::STR_NORMAL, StrId::STR_INVERTED};
 constexpr StrId OPT_SLEEP_TIMEOUT[] = {StrId::STR_MIN_1, StrId::STR_MIN_5, StrId::STR_MIN_10, StrId::STR_MIN_15,
                                        StrId::STR_MIN_30};
+constexpr StrId OPT_DISPLAY_HEADER[] = {StrId::STR_STATE_OFF, StrId::STR_DISPLAY_DATE_ONLY,
+                                        StrId::STR_DISPLAY_TIME_ONLY, StrId::STR_DISPLAY_DAY_AND_TIME};
 constexpr StrId OPT_AUTO_MANUAL[] = {StrId::STR_REFRESH_MODE_AUTO, StrId::STR_MANUAL};
 constexpr StrId OPT_REMINDER_STARTS[] = {StrId::STR_STATE_OFF, StrId::STR_NUM_10, StrId::STR_NUM_20, StrId::STR_NUM_30,
                                          StrId::STR_NUM_40,    StrId::STR_NUM_50, StrId::STR_NUM_60};
@@ -289,6 +295,8 @@ constexpr StrId OPT_BOOK_CHAPTER_HIDE[] = {StrId::STR_BOOK, StrId::STR_CHAPTER, 
 constexpr StrId OPT_BAR_THICKNESS[] = {StrId::STR_PROGRESS_BAR_THIN, StrId::STR_PROGRESS_BAR_MEDIUM,
                                        StrId::STR_PROGRESS_BAR_THICK};
 constexpr StrId OPT_XTC_STATUS_BAR[] = {StrId::STR_HIDE, StrId::STR_BOTTOM, StrId::STR_TOP};
+constexpr StrId OPT_STATUS_BAR_CLOCK[] = {StrId::STR_HIDE, StrId::STR_DIR_RIGHT, StrId::STR_DIR_LEFT};
+constexpr StrId OPT_CLOCK_FORMAT[] = {StrId::STR_CLOCK_FORMAT_24H, StrId::STR_CLOCK_FORMAT_12H};
 
 #define WEB_TOGGLE(name, member, key, category)                                                                       \
   {name, category, WebSettingType::Toggle, &CrossPointSettings::member, nullptr, 0, 0, 0, 0, WebDynamicSetting::None, \
@@ -372,6 +380,7 @@ constexpr WebSettingDef WEB_SETTINGS[] = {
     WEB_TOGGLE(StrId::STR_SHOW_HIDDEN_FILES, showHiddenFiles, "showHiddenFiles", StrId::STR_CAT_SYSTEM),
 
     WEB_TOGGLE(StrId::STR_DISPLAY_DAY, displayDay, "displayDay", StrId::STR_APPS),
+    WEB_ENUM(StrId::STR_DISPLAY_DAY_TIME, displayDay, OPT_DISPLAY_HEADER, "displayDay", StrId::STR_APPS),
     WEB_ENUM(StrId::STR_CHOOSE_WIFI, syncDayWifiChoice, OPT_AUTO_MANUAL, "syncDayWifiChoice", StrId::STR_APPS),
     WEB_ENUM(StrId::STR_SYNC_DAY_REMINDER_EVERY, syncDayReminderStarts, OPT_REMINDER_STARTS, "syncDayReminderStarts",
              StrId::STR_APPS),
@@ -402,7 +411,7 @@ constexpr WebSettingDef WEB_SETTINGS[] = {
              StrId::STR_SHORTCUTS_SECTION),
     WEB_ENUM(StrId::STR_MENU_RECENT_BOOKS, recentBooksShortcut, OPT_SHORTCUT_LOCATION, "recentBooksShortcut",
              StrId::STR_SHORTCUTS_SECTION),
-    WEB_ENUM(StrId::STR_BOOKMARKS, bookmarksShortcut, OPT_SHORTCUT_LOCATION, "bookmarksShortcut",
+    WEB_ENUM(StrId::STR_HIGHLIGHTS, bookmarksShortcut, OPT_SHORTCUT_LOCATION, "bookmarksShortcut",
              StrId::STR_SHORTCUTS_SECTION),
     WEB_ENUM(StrId::STR_FAVORITES, favoritesShortcut, OPT_SHORTCUT_LOCATION, "favoritesShortcut",
              StrId::STR_SHORTCUTS_SECTION),
@@ -437,6 +446,9 @@ constexpr WebSettingDef WEB_SETTINGS[] = {
     WEB_TOGGLE(StrId::STR_BATTERY, statusBarBattery, "statusBarBattery", StrId::STR_CUSTOMISE_STATUS_BAR),
     WEB_ENUM(StrId::STR_XTC_STATUS_BAR, xtcStatusBarMode, OPT_XTC_STATUS_BAR, "xtcStatusBarMode",
              StrId::STR_CUSTOMISE_STATUS_BAR),
+    WEB_ENUM(StrId::STR_CLOCK, statusBarClock, OPT_STATUS_BAR_CLOCK, "statusBarClock", StrId::STR_CUSTOMISE_STATUS_BAR),
+    WEB_ENUM(StrId::STR_CLOCK_FORMAT, clockFormat, OPT_CLOCK_FORMAT, "clockFormat", StrId::STR_CUSTOMISE_STATUS_BAR),
+    WEB_TOGGLE(StrId::STR_CLOCK_SYNCED, clockHasBeenSynced, "clockHasBeenSynced", StrId::STR_CUSTOMISE_STATUS_BAR),
 };
 
 #undef WEB_DYNAMIC_STRING
@@ -455,7 +467,24 @@ const WebSettingDef* findWebSetting(const char* key) {
 }
 
 bool isWebSettingVisible(const WebSettingDef& setting) {
-  return setting.nameId != StrId::STR_TILT_PAGE_TURN || halTiltSensor.isAvailable();
+  if (setting.nameId == StrId::STR_TILT_PAGE_TURN && !halTiltSensor.isAvailable()) {
+    return false;
+  }
+  if ((setting.nameId == StrId::STR_CLOCK || setting.nameId == StrId::STR_CLOCK_FORMAT ||
+       setting.nameId == StrId::STR_CLOCK_SYNCED) &&
+      !halClock.isAvailable()) {
+    return false;
+  }
+  if (setting.nameId == StrId::STR_SYNC_DAY_REMINDER_EVERY && SETTINGS.isHardwareRtcAutoDayClockActive()) {
+    return false;
+  }
+  if (setting.nameId == StrId::STR_DISPLAY_DAY && SETTINGS.isHardwareRtcAutoDayClockActive()) {
+    return false;
+  }
+  if (setting.nameId == StrId::STR_DISPLAY_DAY_TIME && !SETTINGS.isHardwareRtcAutoDayClockActive()) {
+    return false;
+  }
+  return true;
 }
 }  // namespace
 
@@ -740,6 +769,15 @@ void CrossPointWebServer::handleJszip() const {
 }
 
 void CrossPointWebServer::handleNotFound() const {
+  // in AP mode, redirect unmatched browser/captive-portal requests to "/" so the OS auto-opens the browser
+  // API requests (/api/*) still return 404 so XHR errors surface correctly
+  // see https://en.wikipedia.org/wiki/Captive_portal#Detection
+  if (apMode && !server->uri().startsWith("/api/")) {
+    server->sendHeader("Location", "/", true);
+    server->send(302, "text/plain", "");
+    return;
+  }
+
   String message = "404 Not Found\n\n";
   message += "URI: " + server->uri() + "\n";
   server->send(404, "text/plain", message);
@@ -766,6 +804,16 @@ void CrossPointWebServer::handleStatus() const {
   doc["streakDays"] = READING_STATS.getCurrentStreakDays();
   doc["achievementsUnlocked"] = unlockedAchievements;
   doc["achievementsTotal"] = totalAchievements;
+
+  char serialNumber[33] = {};
+  bool validSerial = false;
+  if (esp_efuse_read_field_blob(ESP_EFUSE_USER_DATA, serialNumber, 256) == ESP_OK) {
+    validSerial = serialNumber[0] != '\0' && serialNumber[0] != static_cast<char>(0xFF);
+    for (size_t index = 0; validSerial && index < 32 && serialNumber[index] != '\0'; ++index) {
+      validSerial = std::isprint(static_cast<unsigned char>(serialNumber[index])) != 0;
+    }
+  }
+  doc["serial"] = validSerial ? serialNumber : "Not found";
 
   String json;
   serializeJson(doc, json);

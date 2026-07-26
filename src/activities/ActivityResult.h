@@ -41,6 +41,12 @@ struct BookmarkResult {
   uint32_t page = 0;
 };
 
+struct HighlightResult {
+  std::string text;
+  uint16_t startWordIndex = 0;
+  uint16_t endWordIndex = 0;
+};
+
 struct SyncResult {
   int spineIndex = 0;
   int page = 0;
@@ -66,7 +72,8 @@ struct FilePathResult {
 
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, PageResult,
-                 BookmarkResult, SyncResult, NetworkModeResult, FootnoteResult, FilePathResult>;
+                 BookmarkResult, HighlightResult, SyncResult, NetworkModeResult, FootnoteResult,
+                 FilePathResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

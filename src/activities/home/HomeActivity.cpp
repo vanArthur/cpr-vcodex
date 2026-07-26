@@ -36,6 +36,7 @@
 #include "activities/apps/ReadingStatsActivity.h"
 #include "activities/apps/SleepAppActivity.h"
 #include "activities/apps/SyncDayActivity.h"
+#include "activities/settings/ClockSyncActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -234,7 +235,7 @@ std::string getHomeShortcutTitle(const HomeShortcutEntry& entry) {
   if (!entry.definition) {
     return "";
   }
-  return I18N.get(entry.definition->nameId);
+  return ShortcutUiMetadata::getName(*entry.definition);
 }
 
 std::string getHomeShortcutSubtitle(const HomeShortcutEntry& entry) {
@@ -1185,6 +1186,10 @@ void HomeActivity::onReadingStatsOpen() {
 }
 
 void HomeActivity::onSyncDayOpen() {
+  if (SETTINGS.isHardwareRtcAutoDayClockActive()) {
+    activityManager.replaceActivity(std::make_unique<ClockSyncActivity>(renderer, mappedInput));
+    return;
+  }
   activityManager.replaceActivity(std::make_unique<SyncDayActivity>(renderer, mappedInput));
 }
 
