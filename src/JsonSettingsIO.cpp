@@ -1,6 +1,7 @@
 #include "JsonSettingsIO.h"
 
 #include <ArduinoJson.h>
+#include <CredentialIntegrity.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <ObfuscationUtils.h>
@@ -8,7 +9,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "AchievementsStore.h"
 #include "CrossPointSettings.h"
@@ -20,6 +24,8 @@
 #include "RecentBooksStore.h"
 #include "SettingsList.h"
 #include "WifiCredentialStore.h"
+#include "activities/util/KeyboardLayoutSet.h"
+#include "util/AtomicFileReplace.h"
 #include "util/BookIdentity.h"
 #include "util/CprVcodexLogs.h"
 #include "util/ShortcutRegistry.h"
@@ -64,29 +70,108 @@ class HalFileStream : public Stream {
   int peekedByte = -1;
 };
 
-bool saveJsonDocumentToFile(const char* moduleName, const char* path, const JsonDocument& doc) {
-  const std::string targetPath = path ? path : "";
-  const std::string tempPath = targetPath + ".tmp";
+// Serializes one scalar at a time so large stores do not need a full
+// JsonDocument in memory while the destination file is open. String values are
+// linked only for the duration of serializeJson(), avoiding a second copy.
+class JsonStreamWriter {
+ public:
+  explicit JsonStreamWriter(HalFile& file) : file_(file) {}
 
-  if (targetPath.empty()) {
+  void literal(const char* text) {
+    if (!ok_ || !text) return;
+    const size_t length = std::strlen(text);
+    expectedBytes_ += length;
+    const size_t written = file_.write(text, length);
+    writtenBytes_ += written;
+    if (written != length) ok_ = false;
+  }
+
+  void value(const std::string& text) { writeScalar(JsonString(text.data(), text.size(), true)); }
+
+  template <typename T>
+  void value(const T value) {
+    writeScalar(value);
+  }
+
+  bool ok() const { return ok_; }
+  size_t expectedBytes() const { return expectedBytes_; }
+  size_t writtenBytes() const { return writtenBytes_; }
+
+ private:
+  template <typename T>
+  void writeScalar(const T value) {
+    if (!ok_) return;
+
+    JsonDocument scalar;
+    if (!scalar.set(value) || scalar.overflowed()) {
+      ok_ = false;
+      return;
+    }
+
+    const size_t expected = measureJson(scalar);
+    const size_t written = serializeJson(scalar, file_);
+    expectedBytes_ += expected;
+    writtenBytes_ += written;
+    if (written != expected) ok_ = false;
+  }
+
+  HalFile& file_;
+  size_t expectedBytes_ = 0;
+  size_t writtenBytes_ = 0;
+  bool ok_ = true;
+};
+
+bool promoteJsonTempFile(const char* moduleName, const char* tempPath, const char* targetPath,
+                         const size_t expectedSize) {
+  // Reopen after close to reject a short/failed SD write before touching the
+  // committed file. This is a save path, never a render/input hot path.
+  HalFile verification;
+  if (!Storage.openFileForRead(moduleName, tempPath, verification)) return false;
+  const bool complete = expectedSize > 0 && verification.fileSize64() == expectedSize;
+  verification.close();
+  if (!complete) {
+    LOG_ERR(moduleName, "Refused incomplete JSON replacement: %s", tempPath);
+    return false;
+  }
+  // .bak already has application-specific semantics for reading statistics.
+  // Use a separate transaction backup without changing any existing formats.
+  const std::string previous = std::string(targetPath) + ".previous";
+  if (!AtomicFileReplace::promote(Storage, tempPath, targetPath, previous.c_str())) {
+    LOG_ERR(moduleName, "JSON replacement failed; preserved committed data: %s", targetPath);
+    return false;
+  }
+  return true;
+}
+
+bool saveJsonDocumentToFile(const char* moduleName, const char* path, const JsonDocument& doc) {
+  if (!path || !*path) {
     LOG_ERR(moduleName, "Missing JSON path for write");
     CPR_VCODEX_LOG_EVENT(moduleName, "Missing JSON path for write");
     return false;
   }
 
+  const char* targetPath = path;
+  char tempPath[256];
+  const int tempPathLength = snprintf(tempPath, sizeof(tempPath), "%s.tmp", targetPath);
+  if (tempPathLength < 0 || static_cast<size_t>(tempPathLength) >= sizeof(tempPath)) {
+    LOG_ERR(moduleName, "JSON path is too long for atomic write: %s", targetPath);
+    CPR_VCODEX_LOG_EVENT(moduleName, std::string("JSON path is too long for atomic write: ") + targetPath);
+    return false;
+  }
+
   if (doc.overflowed()) {
-    LOG_ERR(moduleName, "JSON document overflowed before write: %s", targetPath.c_str());
+    LOG_ERR(moduleName, "JSON document overflowed before write: %s", targetPath);
     CPR_VCODEX_LOG_EVENT(moduleName, std::string("Refused to write overflowed JSON document: ") + targetPath);
     return false;
   }
 
-  if (Storage.exists(tempPath.c_str())) {
-    Storage.remove(tempPath.c_str());
+  if (Storage.exists(tempPath)) {
+    Storage.remove(tempPath);
   }
 
   HalFile file;
-  if (!Storage.openFileForWrite(moduleName, tempPath.c_str(), file)) {
-    LOG_ERR(moduleName, "Could not open JSON file for write: %s", tempPath.c_str());
+  if (!Storage.openFileForWrite(moduleName, tempPath, file)) {
+    LOG_ERR(moduleName, "Could not open JSON file for write: %s", tempPath);
     CPR_VCODEX_LOG_EVENT(moduleName, std::string("Could not open JSON temp file for write: ") + tempPath);
     return false;
   }
@@ -94,31 +179,17 @@ bool saveJsonDocumentToFile(const char* moduleName, const char* path, const Json
   const size_t expected = measureJson(doc);
   const size_t written = serializeJson(doc, file);
   file.flush();
-  file.close();
-  if (written == 0 || written != expected) {
-    Storage.remove(tempPath.c_str());
-    LOG_ERR(moduleName, "Incomplete JSON write for %s: %u/%u bytes", targetPath.c_str(),
-            static_cast<unsigned>(written), static_cast<unsigned>(expected));
+  const bool closed = file.close();
+  if (!closed || written == 0 || written != expected) {
+    Storage.remove(tempPath);
+    LOG_ERR(moduleName, "Incomplete JSON write for %s: %u/%u bytes", targetPath, static_cast<unsigned>(written),
+            static_cast<unsigned>(expected));
     CPR_VCODEX_LOG_EVENT(moduleName, std::string("Incomplete JSON write for ") + targetPath + ": " +
                                          std::to_string(written) + "/" + std::to_string(expected) + " bytes");
     return false;
   }
 
-  if (Storage.exists(targetPath.c_str()) && !Storage.remove(targetPath.c_str())) {
-    Storage.remove(tempPath.c_str());
-    LOG_ERR(moduleName, "Could not remove JSON file before replace: %s", targetPath.c_str());
-    CPR_VCODEX_LOG_EVENT(moduleName, std::string("Could not remove JSON file before replace: ") + targetPath);
-    return false;
-  }
-
-  if (!Storage.rename(tempPath.c_str(), targetPath.c_str())) {
-    Storage.remove(tempPath.c_str());
-    LOG_ERR(moduleName, "Could not rename JSON temp file to final path: %s", targetPath.c_str());
-    CPR_VCODEX_LOG_EVENT(moduleName, std::string("Could not rename JSON temp file to final path: ") + targetPath);
-    return false;
-  }
-
-  return true;
+  return promoteJsonTempFile(moduleName, tempPath, targetPath, expected);
 }
 
 bool loadJsonDocumentFromFile(const char* moduleName, const char* path, JsonDocument& doc) {
@@ -353,6 +424,8 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
   }
 
   loadEnum("lineSpacing", s.lineSpacing, CrossPointSettings::LINE_COMPRESSION_COUNT);
+  loadEnum("wordSpacing", s.wordSpacing, 5);
+  loadEnum("readerAutoPageTurn", s.readerAutoPageTurn, 5);
   loadValue("screenMargin", s.screenMargin, 5, 40);
   loadEnum("paragraphAlignment", s.paragraphAlignment, CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT);
   loadToggle("embeddedStyle", s.embeddedStyle);
@@ -405,8 +478,10 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
     }
   }
   loadEnum("tiltPageTurn", s.tiltPageTurn, CrossPointSettings::TILT_PAGE_TURN_COUNT);
+  s.keyboardLayouts = KeyboardLayoutSet::normalizeMask(doc["keyboardLayouts"] | s.keyboardLayouts);
   loadEnum("sleepTimeout", s.sleepTimeout, CrossPointSettings::SLEEP_TIMEOUT_COUNT);
   loadToggle("showHiddenFiles", s.showHiddenFiles);
+  loadToggle("hideFileExtension", s.hideFileExtension);
 
   loadString("opdsServerUrl", s.opdsServerUrl, sizeof(s.opdsServerUrl));
   loadString("opdsUsername", s.opdsUsername, sizeof(s.opdsUsername));
@@ -710,54 +785,104 @@ bool JsonSettingsIO::loadState(CrossPointState& s, const char* json) {
   return true;
 }
 
+bool JsonSettingsIO::recoverFile(const char* path) {
+  if (!path || !*path) return false;
+  const std::string previous = std::string(path) + ".previous";
+  const bool recovered = AtomicFileReplace::recover(Storage, path, previous.c_str());
+  if (!recovered && Storage.exists(previous.c_str())) {
+    LOG_ERR("JSN", "Could not recover previous committed data: %s", path);
+  }
+  return recovered;
+}
+
 // ---- CrossPointSettings ----
+
+bool JsonSettingsIO::saveBookReaderSettings(const ReaderPreferences& settings, const bool enabled, const char* path) {
+  JsonDocument doc;
+  doc["version"] = 1;
+  doc["enabled"] = enabled;
+#define CPR_SAVE_BOOK_FIELD(name, maximum) doc[#name] = settings.name;
+  CPR_READER_PREFERENCE_FIELDS(CPR_SAVE_BOOK_FIELD)
+#undef CPR_SAVE_BOOK_FIELD
+  doc["sdFontFamilyName"] = settings.sdFontFamilyName;
+  return saveJsonDocumentToFile("BRS", path, doc);
+}
+
+bool JsonSettingsIO::loadBookReaderSettings(ReaderPreferences& settings, bool& enabled, const char* path) {
+  JsonDocument doc;
+  if (!loadJsonDocumentFromFile("BRS", path, doc) || !doc.is<JsonObject>() || !doc["version"].is<unsigned>() ||
+      doc["version"].as<unsigned>() != 1 || !doc["enabled"].is<bool>())
+    return false;
+  ReaderPreferences parsed = settings;
+#define CPR_LOAD_BOOK_FIELD(name, maximum)                                               \
+  if (!doc[#name].isNull()) {                                                            \
+    if (!doc[#name].is<unsigned>() || doc[#name].as<unsigned>() > maximum) return false; \
+    parsed.name = doc[#name].as<uint8_t>();                                              \
+  }
+  CPR_READER_PREFERENCE_FIELDS(CPR_LOAD_BOOK_FIELD)
+#undef CPR_LOAD_BOOK_FIELD
+  if (!doc["sdFontFamilyName"].isNull()) {
+    if (!doc["sdFontFamilyName"].is<const char*>()) return false;
+    const char* font = doc["sdFontFamilyName"].as<const char*>();
+    if (std::strlen(font) >= sizeof(parsed.sdFontFamilyName)) return false;
+    std::strcpy(parsed.sdFontFamilyName, font);
+  }
+  settings = parsed;
+  enabled = doc["enabled"].as<bool>();
+  return true;
+}
 
 bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path) {
   JsonDocument doc;
+  const ReaderPreferences reader = s.persistedReaderPreferences();
 
   doc["sleepScreen"] = s.sleepScreen;
   doc["sleepScreenCoverMode"] = s.sleepScreenCoverMode;
   doc["sleepScreenCoverFilter"] = s.sleepScreenCoverFilter;
   doc["cleanSleepRefresh"] = s.cleanSleepRefresh;
   doc["hideBatteryPercentage"] = s.hideBatteryPercentage;
-  doc["refreshFrequency"] = s.refreshFrequency;
+  doc["refreshFrequency"] = reader.refreshFrequency;
   doc["uiTheme"] = s.uiTheme;
   doc["uiThemeSchemaVersion"] = UI_THEME_SCHEMA_VERSION;
-  doc["fadingFix"] = s.fadingFix;
-  doc["darkMode"] = s.darkMode;
+  doc["fadingFix"] = reader.fadingFix;
+  doc["darkMode"] = reader.darkMode;
   doc["antiGhostingExperimental"] = s.antiGhostingExperimental;
 
-  doc["fontFamily"] = s.fontFamily;
+  doc["fontFamily"] = reader.fontFamily;
   doc["fontFamilySchemaVersion"] = FONT_FAMILY_SCHEMA_VERSION;
-  if (s.sdFontFamilyName[0] != '\0') {
-    doc["sdFontFamilyName"] = s.sdFontFamilyName;
+  if (reader.sdFontFamilyName[0] != '\0') {
+    doc["sdFontFamilyName"] = reader.sdFontFamilyName;
   }
-  doc["fontSize"] = s.fontSize;
+  doc["fontSize"] = reader.fontSize;
   doc["fontSizeSchemaVersion"] = FONT_SIZE_SCHEMA_VERSION;
-  doc["lineSpacing"] = s.lineSpacing;
-  doc["screenMargin"] = s.screenMargin;
-  doc["paragraphAlignment"] = s.paragraphAlignment;
-  doc["embeddedStyle"] = s.embeddedStyle;
-  doc["hyphenationEnabled"] = s.hyphenationEnabled;
-  doc["bionicReading"] = s.bionicReading;
-  doc["orientation"] = s.orientation;
-  doc["extraParagraphSpacing"] = s.extraParagraphSpacing;
-  doc["forceParagraphIndents"] = s.forceParagraphIndents;
-  doc["textAntiAliasing"] = s.textAntiAliasing;
-  doc["textDarkness"] = s.textDarkness;
+  doc["lineSpacing"] = reader.lineSpacing;
+  doc["wordSpacing"] = reader.wordSpacing;
+  doc["screenMargin"] = reader.screenMargin;
+  doc["paragraphAlignment"] = reader.paragraphAlignment;
+  doc["embeddedStyle"] = reader.embeddedStyle;
+  doc["hyphenationEnabled"] = reader.hyphenationEnabled;
+  doc["bionicReading"] = reader.bionicReading;
+  doc["orientation"] = reader.orientation;
+  doc["extraParagraphSpacing"] = reader.extraParagraphSpacing;
+  doc["forceParagraphIndents"] = reader.forceParagraphIndents;
+  doc["textAntiAliasing"] = reader.textAntiAliasing;
+  doc["textDarkness"] = reader.textDarkness;
   doc["textDarknessSchemaVersion"] = TEXT_DARKNESS_SCHEMA_VERSION;
-  doc["readerRefreshMode"] = s.readerRefreshMode;
-  doc["imageRendering"] = s.imageRendering;
+  doc["readerRefreshMode"] = reader.readerRefreshMode;
+  doc["imageRendering"] = reader.imageRendering;
+  doc["readerAutoPageTurn"] = reader.readerAutoPageTurn;
 
   doc["sideButtonLayout"] = s.sideButtonLayout;
   doc["frontButtonFollowOrientation"] = s.frontButtonFollowOrientation;
   doc["longPressButtonBehavior"] = s.longPressButtonBehavior;
   doc["longPressChapterSkip"] = s.longPressButtonBehavior == CrossPointSettings::LONG_PRESS_CHAPTER_SKIP;
   doc["shortPwrBtn"] = s.shortPwrBtn;
+  doc["keyboardLayouts"] = KeyboardLayoutSet::normalizeMask(s.keyboardLayouts);
   doc["tiltPageTurn"] = s.tiltPageTurn;
 
   doc["sleepTimeout"] = s.sleepTimeout;
   doc["showHiddenFiles"] = s.showHiddenFiles;
+  doc["hideFileExtension"] = s.hideFileExtension;
 
   doc["displayDay"] = s.displayDay;
   doc["syncDayWifiChoice"] = s.syncDayWifiChoice;
@@ -1166,8 +1291,7 @@ bool JsonSettingsIO::loadKOReader(KOReaderCredentialStore& store, const char* js
                               ? static_cast<DocumentMatchMethod>(method)
                               : DocumentMatchMethod::FILENAME;
     profile.sendMetadata = doc["sendMetadata"] | false;
-    const uint8_t behavior =
-        doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME);
+    const uint8_t behavior = doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME);
     profile.syncBehavior = behavior <= static_cast<uint8_t>(KOReaderSyncBehavior::SMART)
                                ? static_cast<KOReaderSyncBehavior>(behavior)
                                : KOReaderSyncBehavior::ASK_EVERY_TIME;
@@ -1218,8 +1342,7 @@ bool JsonSettingsIO::loadKOReaderLegacyProfile(KOReaderProfile& profile, const c
                             ? static_cast<DocumentMatchMethod>(method)
                             : DocumentMatchMethod::FILENAME;
   profile.sendMetadata = doc["sendMetadata"] | false;
-  const uint8_t behavior =
-      doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME);
+  const uint8_t behavior = doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME);
   profile.syncBehavior = behavior <= static_cast<uint8_t>(KOReaderSyncBehavior::SMART)
                              ? static_cast<KOReaderSyncBehavior>(behavior)
                              : KOReaderSyncBehavior::ASK_EVERY_TIME;
@@ -1232,20 +1355,25 @@ bool JsonSettingsIO::loadKOReaderLegacyProfile(KOReaderProfile& profile, const c
 
 bool JsonSettingsIO::saveWifi(const WifiCredentialStore& store, const char* path) {
   JsonDocument doc;
-  doc["lastConnectedSsid"] = store.getLastConnectedSsid();
+  {
+    std::lock_guard<std::mutex> lock(store.credentialMutex);
+    doc["lastConnectedSsid"] = store.lastConnectedSsid;
 
-  JsonArray arr = doc["credentials"].to<JsonArray>();
-  for (const auto& cred : store.getCredentials()) {
-    JsonObject obj = arr.add<JsonObject>();
-    obj["ssid"] = cred.ssid;
-    obj["password_obf"] = obfuscation::obfuscateToBase64(cred.password);
+    JsonArray arr = doc["credentials"].to<JsonArray>();
+    for (const auto& cred : store.credentials) {
+      JsonObject obj = arr.add<JsonObject>();
+      obj["ssid"] = cred.ssid;
+      obj["password_obf"] = obfuscation::obfuscateToBase64(cred.password);
+      obj["password_len"] = cred.password.size();
+      obj["password_crc32"] = credential_integrity::crc32(cred.password);
+    }
   }
 
   return saveJsonDocumentToFile("WCS", path, doc);
 }
 
 bool JsonSettingsIO::loadWifi(WifiCredentialStore& store, const char* json, bool* needsResave) {
-  if (needsResave) *needsResave = false;
+  bool resave = false;
   JsonDocument doc;
   auto error = deserializeJson(doc, json);
   if (error) {
@@ -1254,24 +1382,93 @@ bool JsonSettingsIO::loadWifi(WifiCredentialStore& store, const char* json, bool
     return false;
   }
 
-  store.lastConnectedSsid = doc["lastConnectedSsid"] | std::string("");
-
-  store.credentials.clear();
+  std::string loadedLastConnectedSsid = doc["lastConnectedSsid"] | std::string("");
+  std::vector<WifiCredential> loadedCredentials;
   JsonArray arr = doc["credentials"].as<JsonArray>();
+  loadedCredentials.reserve(std::min(arr.size(), store.MAX_NETWORKS));
   for (JsonObject obj : arr) {
-    if (store.credentials.size() >= store.MAX_NETWORKS) break;
+    if (loadedCredentials.size() >= store.MAX_NETWORKS) break;
     WifiCredential cred;
     cred.ssid = obj["ssid"] | std::string("");
-    bool ok = false;
-    cred.password = obfuscation::deobfuscateFromBase64(obj["password_obf"] | "", &ok);
-    if (!ok || cred.password.empty()) {
-      cred.password = obj["password"] | std::string("");
-      if (!cred.password.empty() && needsResave) *needsResave = true;
+
+    const JsonVariant passwordLength = obj["password_len"];
+    const bool hasPasswordLength = !passwordLength.isNull();
+    size_t expectedLength = 0;
+    if (hasPasswordLength) {
+      if (!passwordLength.is<size_t>()) {
+        LOG_ERR("WCS", "Discarding corrupted password for %s (invalid length)", cred.ssid.c_str());
+        resave = true;
+        continue;
+      }
+      expectedLength = passwordLength.as<size_t>();
+      if (expectedLength > store.MAX_PASSWORD_LENGTH) {
+        LOG_ERR("WCS", "Discarding oversized password for %s (%zu bytes)", cred.ssid.c_str(), expectedLength);
+        resave = true;
+        continue;
+      }
     }
-    store.credentials.push_back(cred);
+
+    bool ok = false;
+    bool tooLong = false;
+    cred.password =
+        obfuscation::deobfuscateFromBase64(obj["password_obf"] | "", store.MAX_PASSWORD_LENGTH, &ok, &tooLong);
+    if (tooLong) {
+      LOG_ERR("WCS", "Discarding oversized password for %s", cred.ssid.c_str());
+      resave = true;
+      continue;
+    }
+    if (!ok) {
+      const char* legacyPassword = obj["password"] | "";
+      const size_t legacyLength = strlen(legacyPassword);
+      if (legacyLength > store.MAX_PASSWORD_LENGTH) {
+        LOG_ERR("WCS", "Discarding oversized legacy password for %s", cred.ssid.c_str());
+        resave = true;
+        continue;
+      }
+      cred.password.assign(legacyPassword, legacyLength);
+      if (!cred.password.empty()) resave = true;
+    }
+
+    bool integrityValid = true;
+    if (hasPasswordLength) {
+      if (cred.password.size() != expectedLength) {
+        LOG_ERR("WCS", "Discarding corrupted password for %s (expected %zu bytes, decoded %zu)", cred.ssid.c_str(),
+                expectedLength, cred.password.size());
+        integrityValid = false;
+      }
+    } else {
+      resave = true;
+    }
+
+    const JsonVariant checksum = obj["password_crc32"];
+    if (checksum.is<uint32_t>()) {
+      if (credential_integrity::crc32(cred.password) != checksum.as<uint32_t>()) {
+        LOG_ERR("WCS", "Discarding corrupted password for %s (checksum mismatch)", cred.ssid.c_str());
+        integrityValid = false;
+      }
+    } else if (checksum.isNull()) {
+      resave = true;
+    } else {
+      LOG_ERR("WCS", "Discarding corrupted password for %s (invalid checksum)", cred.ssid.c_str());
+      integrityValid = false;
+    }
+
+    if (!integrityValid) {
+      resave = true;
+      continue;
+    }
+    loadedCredentials.push_back(std::move(cred));
   }
 
-  LOG_DBG("WCS", "Loaded %zu WiFi credentials from file", store.credentials.size());
+  const size_t loadedCount = loadedCredentials.size();
+  {
+    std::lock_guard<std::mutex> lock(store.credentialMutex);
+    store.lastConnectedSsid = std::move(loadedLastConnectedSsid);
+    store.credentials = std::move(loadedCredentials);
+  }
+
+  if (needsResave) *needsResave = resave;
+  LOG_DBG("WCS", "Loaded %zu WiFi credentials from file", loadedCount);
   return true;
 }
 
@@ -1371,72 +1568,150 @@ bool JsonSettingsIO::loadFavorites(FavoritesStore& store, const char* json) {
 // ---- ReadingStatsStore ----
 
 bool JsonSettingsIO::saveReadingStats(const ReadingStatsStore& store, const char* path) {
-  JsonDocument doc;
-  doc["formatVersion"] = 6;
+  if (!path || !*path) {
+    LOG_ERR("RST", "Missing JSON path for write");
+    CPR_VCODEX_LOG_EVENT("RST", "Missing JSON path for write");
+    return false;
+  }
 
-  JsonArray days = doc["readingDays"].to<JsonArray>();
+  char tempPath[256];
+  const int tempPathLength = snprintf(tempPath, sizeof(tempPath), "%s.tmp", path);
+  if (tempPathLength < 0 || static_cast<size_t>(tempPathLength) >= sizeof(tempPath)) {
+    LOG_ERR("RST", "JSON path is too long for atomic write: %s", path);
+    CPR_VCODEX_LOG_EVENT("RST", std::string("JSON path is too long for atomic write: ") + path);
+    return false;
+  }
+
+  if (Storage.exists(tempPath)) {
+    Storage.remove(tempPath);
+  }
+
+  HalFile file;
+  if (!Storage.openFileForWrite("RST", tempPath, file)) {
+    LOG_ERR("RST", "Could not open JSON file for write: %s", tempPath);
+    CPR_VCODEX_LOG_EVENT("RST", std::string("Could not open JSON temp file for write: ") + tempPath);
+    return false;
+  }
+
+  JsonStreamWriter writer(file);
+  writer.literal("{\"formatVersion\":6,\"readingDays\":[");
+  bool first = true;
   for (const auto& day : store.getReadingDays()) {
-    JsonObject dayObj = days.add<JsonObject>();
-    dayObj["dayOrdinal"] = day.dayOrdinal;
-    dayObj["readingMs"] = day.readingMs;
+    if (!first) writer.literal(",");
+    first = false;
+    writer.literal("{\"dayOrdinal\":");
+    writer.value(day.dayOrdinal);
+    writer.literal(",\"readingMs\":");
+    writer.value(day.readingMs);
+    writer.literal("}");
   }
 
-  JsonArray legacyDays = doc["legacyReadingDays"].to<JsonArray>();
+  writer.literal("],\"legacyReadingDays\":[");
+  first = true;
   for (const auto& day : store.legacyReadingDays) {
-    JsonObject dayObj = legacyDays.add<JsonObject>();
-    dayObj["dayOrdinal"] = day.dayOrdinal;
-    dayObj["readingMs"] = day.readingMs;
+    if (!first) writer.literal(",");
+    first = false;
+    writer.literal("{\"dayOrdinal\":");
+    writer.value(day.dayOrdinal);
+    writer.literal(",\"readingMs\":");
+    writer.value(day.readingMs);
+    writer.literal("}");
   }
 
-  JsonArray sessionLog = doc["sessionLog"].to<JsonArray>();
+  writer.literal("],\"sessionLog\":[");
+  first = true;
   for (const auto& session : store.getSessionLog()) {
-    JsonObject sessionObj = sessionLog.add<JsonObject>();
-    sessionObj["dayOrdinal"] = session.dayOrdinal;
-    sessionObj["sessionMs"] = session.sessionMs;
+    if (!first) writer.literal(",");
+    first = false;
+    writer.literal("{\"dayOrdinal\":");
+    writer.value(session.dayOrdinal);
+    writer.literal(",\"sessionMs\":");
+    writer.value(session.sessionMs);
     if (!session.bookId.empty()) {
-      sessionObj["bookId"] = session.bookId;
+      writer.literal(",\"bookId\":");
+      writer.value(session.bookId);
     }
     if (!session.path.empty()) {
-      sessionObj["path"] = session.path;
+      writer.literal(",\"path\":");
+      writer.value(session.path);
     }
+    writer.literal("}");
   }
 
-  JsonArray books = doc["books"].to<JsonArray>();
+  writer.literal("],\"books\":[");
+  first = true;
   for (const auto& book : store.getBooks()) {
-    JsonObject obj = books.add<JsonObject>();
-    obj["bookId"] = book.bookId;
-    obj["path"] = book.path;
-    JsonArray knownPaths = obj["knownPaths"].to<JsonArray>();
+    if (!first) writer.literal(",");
+    first = false;
+    writer.literal("{\"bookId\":");
+    writer.value(book.bookId);
+    writer.literal(",\"path\":");
+    writer.value(book.path);
+    writer.literal(",\"knownPaths\":[");
+    bool firstKnownPath = true;
     for (const auto& knownPath : book.knownPaths) {
-      knownPaths.add(knownPath);
+      if (!firstKnownPath) writer.literal(",");
+      firstKnownPath = false;
+      writer.value(knownPath);
     }
-    obj["title"] = book.title;
-    obj["author"] = book.author;
-    obj["coverBmpPath"] = book.coverBmpPath;
-    obj["chapterTitle"] = book.chapterTitle;
-    obj["totalReadingMs"] = book.totalReadingMs;
-    obj["sessions"] = book.sessions;
-    obj["lastSessionMs"] = book.lastSessionMs;
-    obj["firstReadAt"] = book.firstReadAt;
-    obj["lastReadAt"] = book.lastReadAt;
-    obj["completedAt"] = book.completedAt;
-    obj["lastProgressPercent"] = book.lastProgressPercent;
-    obj["chapterProgressPercent"] = book.chapterProgressPercent;
-    obj["completed"] = book.completed;
-
-    JsonArray bookDays = obj["readingDays"].to<JsonArray>();
+    writer.literal("],\"title\":");
+    writer.value(book.title);
+    writer.literal(",\"author\":");
+    writer.value(book.author);
+    writer.literal(",\"coverBmpPath\":");
+    writer.value(book.coverBmpPath);
+    writer.literal(",\"chapterTitle\":");
+    writer.value(book.chapterTitle);
+    writer.literal(",\"totalReadingMs\":");
+    writer.value(book.totalReadingMs);
+    writer.literal(",\"sessions\":");
+    writer.value(book.sessions);
+    writer.literal(",\"lastSessionMs\":");
+    writer.value(book.lastSessionMs);
+    writer.literal(",\"firstReadAt\":");
+    writer.value(book.firstReadAt);
+    writer.literal(",\"lastReadAt\":");
+    writer.value(book.lastReadAt);
+    writer.literal(",\"completedAt\":");
+    writer.value(book.completedAt);
+    writer.literal(",\"lastProgressPercent\":");
+    writer.value(book.lastProgressPercent);
+    writer.literal(",\"chapterProgressPercent\":");
+    writer.value(book.chapterProgressPercent);
+    writer.literal(",\"completed\":");
+    writer.value(book.completed);
+    writer.literal(",\"readingDays\":[");
+    bool firstBookDay = true;
     for (const auto& day : book.readingDays) {
-      JsonObject dayObj = bookDays.add<JsonObject>();
-      dayObj["dayOrdinal"] = day.dayOrdinal;
-      dayObj["readingMs"] = day.readingMs;
+      if (!firstBookDay) writer.literal(",");
+      firstBookDay = false;
+      writer.literal("{\"dayOrdinal\":");
+      writer.value(day.dayOrdinal);
+      writer.literal(",\"readingMs\":");
+      writer.value(day.readingMs);
+      writer.literal("}");
     }
+    writer.literal("]}");
+  }
+  writer.literal("]}");
+
+  file.flush();
+  const bool closed = file.close();
+  if (!closed || !writer.ok() || writer.writtenBytes() == 0 || writer.writtenBytes() != writer.expectedBytes()) {
+    Storage.remove(tempPath);
+    LOG_ERR("RST", "Incomplete JSON write for %s: %u/%u bytes", path, static_cast<unsigned>(writer.writtenBytes()),
+            static_cast<unsigned>(writer.expectedBytes()));
+    CPR_VCODEX_LOG_EVENT("RST", std::string("Incomplete JSON write for ") + path + ": " +
+                                    std::to_string(writer.writtenBytes()) + "/" +
+                                    std::to_string(writer.expectedBytes()) + " bytes");
+    return false;
   }
 
-  return saveJsonDocumentToFile("RST", path, doc);
+  return promoteJsonTempFile("RST", tempPath, path, writer.writtenBytes());
 }
 
 bool JsonSettingsIO::loadReadingStatsDocument(ReadingStatsStore& store, const JsonDocument& doc) {
-  if (!doc.is<JsonObject>()) {
+  if (!doc.is<JsonObjectConst>()) {
     CPR_VCODEX_LOG_EVENT("RST", "Reading stats root is not a JSON object");
     return false;
   }
@@ -1448,37 +1723,48 @@ bool JsonSettingsIO::loadReadingStatsDocument(ReadingStatsStore& store, const Js
   }
   const uint32_t formatVersion = formatValue | static_cast<uint32_t>(1);
   if (formatVersion == 0 || formatVersion > 6) {
-    CPR_VCODEX_LOG_EVENT("RST", std::string("Unsupported reading stats formatVersion: ") +
-                                   std::to_string(formatVersion));
+    CPR_VCODEX_LOG_EVENT("RST",
+                         std::string("Unsupported reading stats formatVersion: ") + std::to_string(formatVersion));
     return false;
   }
 
   static constexpr const char* ARRAY_KEYS[] = {"readingDays", "legacyReadingDays", "sessionLog", "books"};
+  bool hasStatsArray = false;
+  bool missingCurrentArray = false;
   for (const char* key : ARRAY_KEYS) {
     const JsonVariantConst value = doc[key];
-    if ((!value.isNull() || formatVersion >= 6) && !value.is<JsonArray>()) {
+    if (value.isNull()) {
+      missingCurrentArray = missingCurrentArray || formatVersion >= 6;
+      continue;
+    }
+    if (!value.is<JsonArrayConst>()) {
       CPR_VCODEX_LOG_EVENT("RST", std::string("Reading stats field is not an array: ") + key);
       return false;
     }
+    hasStatsArray = true;
+  }
+  if (!hasStatsArray) {
+    CPR_VCODEX_LOG_EVENT("RST", "Reading stats document has no recognized data arrays");
+    return false;
   }
 
   for (JsonVariantConst value : doc["books"].as<JsonArrayConst>()) {
-    if (!value.is<JsonObject>()) {
+    if (!value.is<JsonObjectConst>()) {
       CPR_VCODEX_LOG_EVENT("RST", "Reading stats books contains a non-object entry");
       return false;
     }
     const JsonObjectConst obj = value.as<JsonObjectConst>();
-    if (!obj["knownPaths"].isNull() && !obj["knownPaths"].is<JsonArray>()) {
+    if (!obj["knownPaths"].isNull() && !obj["knownPaths"].is<JsonArrayConst>()) {
       CPR_VCODEX_LOG_EVENT("RST", "Reading stats knownPaths is not an array");
       return false;
     }
-    if (formatVersion >= 2 && !obj["readingDays"].isNull() && !obj["readingDays"].is<JsonArray>()) {
+    if (formatVersion >= 2 && !obj["readingDays"].isNull() && !obj["readingDays"].is<JsonArrayConst>()) {
       CPR_VCODEX_LOG_EVENT("RST", "Reading stats book readingDays is not an array");
       return false;
     }
   }
   for (JsonVariantConst value : doc["sessionLog"].as<JsonArrayConst>()) {
-    if (!value.is<JsonObject>()) {
+    if (!value.is<JsonObjectConst>()) {
       CPR_VCODEX_LOG_EVENT("RST", "Reading stats sessionLog contains a non-object entry");
       return false;
     }
@@ -1488,12 +1774,12 @@ bool JsonSettingsIO::loadReadingStatsDocument(ReadingStatsStore& store, const Js
   store.legacyReadingDays.clear();
   store.readingDays.clear();
   store.sessionLog.clear();
-  store.dirty = false;
+  store.dirty = missingCurrentArray;
 
   auto appendReadingDays = [](std::vector<ReadingDayStats>& destination, JsonArrayConst source) {
     for (JsonVariantConst value : source) {
       ReadingDayStats day;
-      if (value.is<JsonObject>()) {
+      if (value.is<JsonObjectConst>()) {
         JsonObjectConst obj = value.as<JsonObjectConst>();
         day.dayOrdinal = obj["dayOrdinal"] | static_cast<uint32_t>(0);
         day.readingMs = obj["readingMs"] | static_cast<uint64_t>(0);
@@ -1520,14 +1806,25 @@ bool JsonSettingsIO::loadReadingStatsDocument(ReadingStatsStore& store, const Js
 
   if (formatVersion >= 4) {
     for (JsonObjectConst sessionObj : doc["sessionLog"].as<JsonArrayConst>()) {
-      ReadingSessionLogEntry session;
-      session.dayOrdinal = sessionObj["dayOrdinal"] | static_cast<uint32_t>(0);
-      session.sessionMs = sessionObj["sessionMs"] | static_cast<uint32_t>(0);
-      session.bookId = sessionObj["bookId"] | std::string("");
-      session.path = BookIdentity::normalizePath(sessionObj["path"] | std::string(""));
-      if (session.dayOrdinal != 0 && session.sessionMs != 0) {
-        store.sessionLog.push_back(session);
+      const uint32_t dayOrdinal = sessionObj["dayOrdinal"] | static_cast<uint32_t>(0);
+      const uint32_t sessionMs = sessionObj["sessionMs"] | static_cast<uint32_t>(0);
+      if (dayOrdinal == 0 || sessionMs == 0) continue;
+
+      if (store.sessionLog.size() >= ReadingSessionLog::MAX_ENTRIES) {
+        store.dirty = true;
       }
+      ReadingSessionLog::makeRoomForAppend(store.sessionLog);
+
+      ReadingSessionLogEntry session;
+      session.dayOrdinal = dayOrdinal;
+      session.sessionMs = sessionMs;
+      session.bookId = sessionObj["bookId"] | std::string("");
+      if (session.bookId.empty()) {
+        session.path = BookIdentity::normalizePath(sessionObj["path"] | std::string(""));
+      } else if (!sessionObj["path"].isNull()) {
+        store.dirty = true;
+      }
+      store.sessionLog.push_back(std::move(session));
     }
   } else {
     store.dirty = true;
@@ -1594,21 +1891,28 @@ bool JsonSettingsIO::loadReadingStatsDocument(ReadingStatsStore& store, const Js
       days.resize(writeIndex);
     };
     normalizeDays(declaredReadingDays);
-    const bool aggregatesMatch = declaredReadingDays.size() == store.readingDays.size() &&
-                                 std::equal(declaredReadingDays.begin(), declaredReadingDays.end(),
-                                            store.readingDays.begin(), [](const ReadingDayStats& left,
-                                                                         const ReadingDayStats& right) {
-                                              return left.dayOrdinal == right.dayOrdinal &&
-                                                     left.readingMs == right.readingMs;
-                                            });
-    if (!aggregatesMatch) {
-      store.books.clear();
-      store.legacyReadingDays.clear();
-      store.readingDays.clear();
-      store.sessionLog.clear();
-      store.dirty = false;
-      CPR_VCODEX_LOG_EVENT("RST", "Reading stats aggregate totals do not match per-book data");
-      return false;
+
+    bool aggregateMismatch = declaredReadingDays.size() != store.readingDays.size();
+    for (const auto& declaredDay : declaredReadingDays) {
+      const auto rebuiltIt =
+          std::lower_bound(store.readingDays.begin(), store.readingDays.end(), declaredDay.dayOrdinal,
+                           [](const ReadingDayStats& day, const uint32_t ordinal) { return day.dayOrdinal < ordinal; });
+      const bool hasRebuiltDay =
+          rebuiltIt != store.readingDays.end() && rebuiltIt->dayOrdinal == declaredDay.dayOrdinal;
+      const uint64_t rebuiltMs = hasRebuiltDay ? rebuiltIt->readingMs : 0;
+      if (rebuiltMs != declaredDay.readingMs) {
+        aggregateMismatch = true;
+      }
+      if (declaredDay.readingMs > rebuiltMs) {
+        store.legacyReadingDays.push_back(ReadingDayStats{declaredDay.dayOrdinal, declaredDay.readingMs - rebuiltMs});
+      }
+    }
+
+    if (aggregateMismatch) {
+      normalizeDays(store.legacyReadingDays);
+      store.rebuildAggregatedReadingDays();
+      store.dirty = true;
+      CPR_VCODEX_LOG_EVENT("RST", "Reconciled reading stats aggregate totals without discarding stored data");
     }
   }
 

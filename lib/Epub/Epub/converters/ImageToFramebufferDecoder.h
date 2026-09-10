@@ -1,8 +1,11 @@
 #pragma once
 #include <HalStorage.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
+
+#include "PixelCacheFormat.h"
 
 class GfxRenderer;
 
@@ -19,6 +22,9 @@ struct RenderConfig {
   bool performanceMode = false;
   bool useExactDimensions = false;  // If true, use maxWidth/maxHeight as exact output size (no recalculation)
   std::string cachePath;            // If non-empty, decoder will write pixel cache to this path
+  // Tone calibration the quantized pixels are written for; stored in the cache
+  // header so they are not reused under the other waveform.
+  PixelCacheVariant cacheVariant = PixelCacheVariant::Differential;
 };
 
 class ImageToFramebufferDecoder {
@@ -31,10 +37,14 @@ class ImageToFramebufferDecoder {
 
   virtual const char* getFormatName() const = 0;
 
- protected:
-  // Size validation helpers
-  static constexpr int MAX_SOURCE_PIXELS = 3145728;  // 2048 * 1536
+  // Shared by header probes and decoders so dimensions are validated before
+  // narrowing to the int16_t layout representation.
+  static bool validateAndStoreDimensions(int64_t width, int64_t height, ImageDimensions& out, const char* format);
 
-  bool validateImageDimensions(int width, int height, const std::string& format);
+  // Long image decodes must periodically yield to keep the idle task and its
+  // watchdog serviced. The caller owns the timestamp so callbacks stay reentrant.
+  static void yieldDuringDecode(uint32_t& lastYieldMs);
+
+ protected:
   void warnUnsupportedFeature(const std::string& feature, const std::string& imagePath);
 };

@@ -28,7 +28,6 @@ constexpr unsigned long MAX_READING_GAP_MS = 30UL * 60UL * 1000UL;
 constexpr unsigned long SESSION_HEARTBEAT_MS = 60UL * 1000UL;
 constexpr unsigned long DEFERRED_SAVE_INTERVAL_MS = 30UL * 1000UL;
 constexpr uint64_t MIN_SESSION_READING_MS = 3ULL * 60ULL * 1000ULL;
-constexpr size_t MAX_SESSION_LOG_ENTRIES = 256;
 
 uint8_t clampPercent(const uint8_t percent) { return std::min<uint8_t>(percent, 100); }
 
@@ -776,11 +775,16 @@ void ReadingStatsStore::appendSessionLogEntry(const uint32_t dayOrdinal, const u
     return;
   }
 
-  sessionLog.push_back(ReadingSessionLogEntry{dayOrdinal, sessionMs, book.bookId, book.path});
-  if (sessionLog.size() > MAX_SESSION_LOG_ENTRIES) {
-    sessionLog.erase(sessionLog.begin(),
-                     sessionLog.begin() + static_cast<std::ptrdiff_t>(sessionLog.size() - MAX_SESSION_LOG_ENTRIES));
+  ReadingSessionLog::makeRoomForAppend(sessionLog);
+
+  ReadingSessionLogEntry entry;
+  entry.dayOrdinal = dayOrdinal;
+  entry.sessionMs = sessionMs;
+  entry.bookId = book.bookId;
+  if (entry.bookId.empty()) {
+    entry.path = book.path;
   }
+  sessionLog.push_back(std::move(entry));
 }
 
 bool ReadingStatsStore::convertLegacyReadingDaysToUnassigned() {
@@ -1668,7 +1672,12 @@ bool ReadingStatsStore::exportToFile(const std::string& path) const {
 }
 
 bool ReadingStatsStore::importFromFile(const std::string& path) {
-  if (path.empty() || !Storage.exists(path.c_str())) {
+  if (path.empty()) {
+    CPR_VCODEX_LOG_EVENT("RST", "Reading stats import rejected an empty path");
+    return false;
+  }
+  if (!Storage.exists(path.c_str())) {
+    CPR_VCODEX_LOG_EVENT("RST", std::string("Reading stats import file was not found: ") + path);
     return false;
   }
 
@@ -1699,7 +1708,7 @@ bool ReadingStatsStore::importFromFile(const std::string& path) {
           heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT));
   const bool loaded = JsonSettingsIO::loadReadingStatsFromFile(*this, path.c_str());
   if (!loaded) {
-    reloadOriginalStats();
+    CPR_VCODEX_LOG_EVENT("RST", std::string("Reading stats import source was rejected: ") + path);
     return false;
   }
 
@@ -1717,9 +1726,9 @@ bool ReadingStatsStore::importFromFile(const std::string& path) {
   activeSession = {};
   lastSessionSnapshot = {};
   sessionSerialCounter = 0;
-  if (sessionLog.size() > MAX_SESSION_LOG_ENTRIES) {
-    sessionLog.erase(sessionLog.begin(),
-                     sessionLog.begin() + static_cast<std::ptrdiff_t>(sessionLog.size() - MAX_SESSION_LOG_ENTRIES));
+  if (sessionLog.size() > ReadingSessionLog::MAX_ENTRIES) {
+    sessionLog.erase(sessionLog.begin(), sessionLog.begin() + static_cast<std::ptrdiff_t>(
+                                                                  sessionLog.size() - ReadingSessionLog::MAX_ENTRIES));
   }
   removeIgnoredBooks();
   rebuildAggregatedReadingDays();
@@ -1753,6 +1762,7 @@ bool ReadingStatsStore::saveToFile() const {
 }
 
 bool ReadingStatsStore::loadFromFile() {
+  JsonSettingsIO::recoverFile(READING_STATS_FILE_JSON);
   const std::string tempPath = std::string(READING_STATS_FILE_JSON) + ".tmp";
   if (!Storage.exists(READING_STATS_FILE_JSON) && Storage.exists(tempPath.c_str())) {
     if (Storage.rename(tempPath.c_str(), READING_STATS_FILE_JSON)) {
@@ -1786,9 +1796,10 @@ bool ReadingStatsStore::loadFromFile() {
     activeSession = {};
     lastSessionSnapshot = {};
     sessionSerialCounter = 0;
-    if (sessionLog.size() > MAX_SESSION_LOG_ENTRIES) {
-      sessionLog.erase(sessionLog.begin(),
-                       sessionLog.begin() + static_cast<std::ptrdiff_t>(sessionLog.size() - MAX_SESSION_LOG_ENTRIES));
+    if (sessionLog.size() > ReadingSessionLog::MAX_ENTRIES) {
+      sessionLog.erase(
+          sessionLog.begin(),
+          sessionLog.begin() + static_cast<std::ptrdiff_t>(sessionLog.size() - ReadingSessionLog::MAX_ENTRIES));
     }
     invalidateSummaryCache();
     if (needsSave) {
@@ -1810,6 +1821,10 @@ bool ReadingStatsStore::loadFromFile() {
   } else if (loaded && !hasAnyStats() && statsFileAppearsToHaveData(READING_STATS_BACKUP_FILE_JSON) &&
              restoreInternalBackupToMain("empty main file")) {
     loaded = loadMainFile();
+  }
+  if (!loaded) {
+    markLoadSkippedForRecovery();
+    CPR_VCODEX_LOG_EVENT("RST", "Reading stats persistence suspended after load failure");
   }
   return loaded;
 }

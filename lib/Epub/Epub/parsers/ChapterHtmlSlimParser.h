@@ -5,6 +5,7 @@
 
 #include <climits>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -31,6 +32,7 @@ class ChapterHtmlSlimParser {
     uint32_t xhtmlByteOffset = 0;
     uint16_t paragraphIndex = 0;
     uint16_t listItemIndex = 0;
+    uint32_t visibleTextOffset = 0;
   };
 
  private:
@@ -77,6 +79,7 @@ class ChapterHtmlSlimParser {
   uint16_t viewportHeight;
   bool hyphenationEnabled;
   bool focusReadingEnabled;
+  uint8_t wordSpacing;
   CssParser* cssParser;
   bool embeddedStyle;
   uint8_t imageRendering;
@@ -85,6 +88,7 @@ class ChapterHtmlSlimParser {
   int imageCounter = 0;
   bool lowMemoryImageFallback = false;
   bool lowMemoryAbort = false;
+  bool htmlEnded_ = false;
   bool attemptedTextLayoutFontCacheRelease = false;
   bool loggedSoftLowMemoryContinuation = false;
 
@@ -104,6 +108,7 @@ class ChapterHtmlSlimParser {
     bool hasStrikeThrough = false, strikeThrough = false;
     bool hasSup = false, sup = false;
     bool hasSub = false, sub = false;
+    bool hasSmallCaps = false, smallCaps = false;
   };
   std::vector<StyleStackEntry> inlineStyleStack;
   std::vector<BlockStyle> blockStyleStack;  // accumulated block styles from open ancestor elements
@@ -114,6 +119,7 @@ class ChapterHtmlSlimParser {
   bool effectiveStrikeThrough = false;
   bool effectiveSup = false;
   bool effectiveSub = false;
+  bool effectiveSmallCaps = false;
 
   struct BufferedTableCell {
     std::unique_ptr<ParsedText> text;
@@ -148,7 +154,7 @@ class ChapterHtmlSlimParser {
 
   // Anchor-to-page mapping: tracks which page each HTML id attribute lands on
   int completedPageCount = 0;
-  std::vector<std::pair<std::string, uint16_t>> anchorData;
+  std::deque<std::pair<std::string, uint16_t>> anchorData;
   std::string pendingAnchorId;          // deferred until after previous text block is flushed
   std::vector<std::string> tocAnchors;  // the list of anchors that are TOC chapter boundaries
   std::vector<std::string> referencedAnchors;
@@ -156,6 +162,14 @@ class ChapterHtmlSlimParser {
   uint32_t lastBodyChildByteOffset = 0;
   uint16_t xpathParagraphIndex = 0;
   uint16_t xpathListItemIndex = 0;
+  // Stable source position: zero-based Unicode codepoints in visible body text.
+  uint32_t visibleTextOffset = 0;
+  uint32_t partWordVisibleOffset = 0;
+  uint32_t currentPageVisibleOffset = 0;
+  bool currentPageVisibleOffsetSet = false;
+  bool insideBody = false;
+  bool syntheticCharacterData = false;
+  uint16_t nonVisibleTextDepth = 0;
 
   // Footnote link tracking
   bool insideFootnoteLink = false;
@@ -166,6 +180,8 @@ class ChapterHtmlSlimParser {
   int wordsExtractedInBlock = 0;
 
   void updateEffectiveInlineStyle();
+  static void applyVerticalAlignToEntry(StyleStackEntry& entry, const CssStyle& style);
+  static void applySmallCapsToEntry(StyleStackEntry& entry, const CssStyle& style);
   bool shouldAbortForLowMemory(const char* stage);
   bool startNewPage(const char* reason);
   void collectReferencedAnchors();
@@ -178,6 +194,8 @@ class ChapterHtmlSlimParser {
   void startNewTextBlock(const BlockStyle& blockStyle);
   void flushPendingAnchor();
   void flushPartWordBuffer();
+  void flushLongTextBlockIfNeeded();
+  void setCurrentPageVisibleOffset(uint32_t offset);
   void makePages();
   void emitPage(uint32_t xhtmlByteOffset);
   void emitHorizontalRule(const BlockStyle& blockStyle);
@@ -199,6 +217,7 @@ class ChapterHtmlSlimParser {
                                  const bool forceParagraphIndents, const uint8_t paragraphAlignment,
                                  const uint16_t viewportWidth, const uint16_t viewportHeight,
                                  const bool hyphenationEnabled, const bool focusReadingEnabled,
+                                 const uint8_t wordSpacing,
                                  const std::function<void(std::unique_ptr<Page>, ParagraphLutEntry)>& completePageFn,
                                  const bool embeddedStyle, const std::string& contentBase,
                                  const std::string& imageBasePath, const uint8_t imageRendering = 0,
@@ -217,6 +236,7 @@ class ChapterHtmlSlimParser {
         viewportHeight(viewportHeight),
         hyphenationEnabled(hyphenationEnabled),
         focusReadingEnabled(focusReadingEnabled),
+        wordSpacing(std::min<uint8_t>(wordSpacing, 4)),
         completePageFn(completePageFn),
         popupFn(popupFn),
         cssParser(cssParser),
@@ -235,8 +255,8 @@ class ChapterHtmlSlimParser {
   void abortParse();
   size_t parseBytesConsumed() { return parseFile_ ? parseFile_.position() : 0; }
   size_t parseTotalBytes() { return parseFile_ ? parseFile_.size() : 0; }
-  void addLineToPage(std::shared_ptr<TextBlock> line);
-  const std::vector<std::pair<std::string, uint16_t>>& getAnchors() const { return anchorData; }
+  void addLineToPage(std::shared_ptr<TextBlock> line, uint32_t visibleOffset);
+  const std::deque<std::pair<std::string, uint16_t>>& getAnchors() const { return anchorData; }
   bool wasLowMemoryFallbackTriggered() const { return lowMemoryImageFallback; }
   bool wasLowMemoryAbortTriggered() const { return lowMemoryAbort; }
 };

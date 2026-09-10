@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <deque>
 #include <string>
+#include <vector>
+
+#include "CumulativeSizeCache.h"
 
 class BookMetadataCache {
  public:
@@ -50,10 +53,14 @@ class BookMetadataCache {
   bool loaded;
   bool buildMode;
 
-  FsFile bookFile;
+  mutable FsFile bookFile;
   // Temp file handles during build
   FsFile spineFile;
   FsFile tocFile;
+
+  // Four bytes per spine item; avoids two seeks and a temporary href string on
+  // every progress calculation and percentage jump.
+  mutable CumulativeSizeCache cumulativeSizes;
 
   // Index for fast href→spineIndex lookup (used only for large EPUBs)
   struct SpineHrefIndexEntry {
@@ -106,6 +113,7 @@ class BookMetadataCache {
   bool load();
   SpineEntry getSpineEntry(int index);
   TocEntry getTocEntry(int index);
+  uint32_t getCumulativeSize(int index) const;
   int getSpineCount() const { return spineCount; }
   int getTocCount() const { return tocCount; }
   bool isLoaded() const { return loaded; }

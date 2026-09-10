@@ -7,6 +7,7 @@ class FontCacheManager;
 class SdCardFont;
 
 #include <cstring>
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -27,7 +28,24 @@ enum Color : uint8_t {
 
 class GfxRenderer {
  public:
-  enum RenderMode { BW, GRAYSCALE_LSB, GRAYSCALE_MSB };
+  // GRAYSCALE_* = differential 2-bit overlay passes (mark pixels to nudge).
+  // GRAY2_* = factory absolute 2-bit passes: clearScreen(0x00) base,
+  // drawPixel(false) sets the plane bit. Encoding (per plane pass, ported from
+  // the zgredex fork): LSB (BW RAM) marks Black(0) and LightGray(2);
+  // MSB (RED RAM) marks Black(0) and DarkGray(1). Values are the 0-3
+  // quantizer output where 0=black, 3=white.
+  enum RenderMode { BW, GRAYSCALE_LSB, GRAYSCALE_MSB, GRAY2_LSB, GRAY2_MSB };
+
+  // Waveform selection for a full grayscale render.
+  // FactoryFast/FactoryQuality use the OEM absolute 2-bit LUTs (V3.1.9
+  // firmware extraction) with a self-contained power cycle; Differential is
+  // the existing overlay path on top of a BW base frame.
+  enum class GrayscaleMode { Differential, FactoryFast, FactoryQuality };
+
+  // Tracks whether the panel's last update came from a factory LUT render.
+  // After FactoryLut the controller already powered down (0xC7 sequence), so
+  // the next displayBuffer() must not request another turn-off.
+  enum class DisplayState { BW, FactoryLut };
 
   // Logical screen orientation from the perspective of callers
   enum Orientation {
@@ -54,13 +72,24 @@ class GfxRenderer {
   std::vector<uint8_t*> bwBufferChunks;
   std::map<int, EpdFontFamily> fontMap;
   mutable std::map<int, SdCardFont*> sdCardFonts_;
+  std::map<int, int> fallbackFontMap_;
   mutable bool nextRefreshOverridePending = false;
   mutable HalDisplay::RefreshMode nextRefreshOverride = HalDisplay::FAST_REFRESH;
+  mutable DisplayState displayState = DisplayState::BW;
+  // Which waveform's tone calibration image decoding should target. Set by the
+  // reader before rendering a page; consumed by the image cache so pixels
+  // quantized for one waveform are not reused under the other.
+  mutable GrayscaleMode imageToneMode = GrayscaleMode::Differential;
 
   // Tiled grayscale strip target. When active, drawPixel()/clearScreen()
   // operate on a caller-owned scratch holding physical rows
   // [_stripY0, _stripY0 + _stripRows) instead of the shared framebuffer.
+  // _stripBufMsb, when non-null in GRAY2_LSB mode, enables dual-plane
+  // rendering: one renderFn pass writes the LSB plane to _stripBuf and the
+  // MSB plane to _stripBufMsb (1-bit draws are mirrored; 2-bit draws write
+  // per-plane bits explicitly via drawPixelGray2 / DirectPixelWriter).
   mutable uint8_t* _stripBuf = nullptr;
+  mutable uint8_t* _stripBufMsb = nullptr;
   mutable int _stripY0 = 0;
   mutable int _stripRows = 0;
   mutable bool _stripActive = false;
@@ -69,6 +98,9 @@ class GfxRenderer {
   // recording to the (non-const) FontCacheManager. Same pragmatic compromise
   // as before, concentrated in a single pointer instead of four fields.
   mutable FontCacheManager* fontCacheManager_ = nullptr;
+
+  int resolveTextFontId(int fontId, const char* text, EpdFontFamily::Style style) const;
+  void ensureSdGlyphsResident(int fontId, const char* text, EpdFontFamily::Style style, bool metadataOnly) const;
 
   void renderChar(const EpdFontFamily& fontFamily, uint32_t cp, int* x, int* y, bool pixelState,
                   EpdFontFamily::Style style) const;
@@ -100,6 +132,9 @@ class GfxRenderer {
   }
   void setFontCacheManager(FontCacheManager* m) { fontCacheManager_ = m; }
   FontCacheManager* getFontCacheManager() const { return fontCacheManager_; }
+  using TextGetter = const char* (*)(const void* ctx, uint32_t index);
+  void prewarmFallbackText(int fontId, TextGetter getter, const void* ctx, uint32_t textCount,
+                           EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   bool isFontCacheScanning() const;
   const std::map<int, EpdFontFamily>& getFontMap() const { return fontMap; }
   void registerSdCardFont(int fontId, SdCardFont* font) { sdCardFonts_[fontId] = font; }
@@ -107,8 +142,10 @@ class GfxRenderer {
   void clearSdCardFonts() { sdCardFonts_.clear(); }
   const std::map<int, SdCardFont*>& getSdCardFonts() const { return sdCardFonts_; }
   bool isSdCardFont(int fontId) const { return sdCardFonts_.count(fontId) > 0; }
+  void setFallbackFont(int primaryFontId, int fallbackFontId) { fallbackFontMap_[primaryFontId] = fallbackFontId; }
+  void clearFallbackFonts() { fallbackFontMap_.clear(); }
   void ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F) const;
-  void ensureSdCardFontReady(int fontId, const std::vector<std::string>& words, bool includeHyphen,
+  void ensureSdCardFontReady(int fontId, const std::deque<std::string>& words, bool includeHyphen,
                              uint8_t styleMask = 0x0F) const;
   bool releaseSdCardFontForLowMemory(int fontId) const;
 
@@ -139,12 +176,19 @@ class GfxRenderer {
   void clearScreen(uint8_t color = 0xFF) const;
   void getOrientedViewableTRBL(int* outTop, int* outRight, int* outBottom, int* outLeft) const;
 
-  void beginStripTarget(uint8_t* scratch, int stripY0, int stripRows) const;
+  void beginStripTarget(uint8_t* scratch, int stripY0, int stripRows, uint8_t* scratchMsb = nullptr) const;
   void endStripTarget() const;
   bool glyphIntersectsStrip(int x0, int y0, int x1, int y1) const;
   uint8_t* getWriteTarget() const { return _stripActive ? _stripBuf : frameBuffer; }
   int getWriteOriginY() const { return _stripActive ? _stripY0 : 0; }
   int getWriteRows() const { return _stripActive ? _stripRows : panelHeight; }
+  // Dual-plane GRAY2 strip rendering (LSB pass also produces the MSB plane).
+  bool isDualGray2Active() const { return _stripActive && _stripBufMsb != nullptr && renderMode == GRAY2_LSB; }
+  uint8_t* getWriteTargetMsb() const { return _stripBufMsb; }
+  // Write one quantized 2-bit value (0=black..3=white) to both GRAY2 plane
+  // scratches with the correct per-plane bits. Only marks bits (background
+  // stays as cleared by clearScreen(0x00)), matching two-pass semantics.
+  void drawPixelGray2(int x, int y, uint8_t val) const;
 
   // Drawing
   void drawPixel(int x, int y, bool state = true) const;
@@ -209,7 +253,12 @@ class GfxRenderer {
   void displayGrayscaleBase(HalDisplay::RefreshMode fallback = HalDisplay::HALF_REFRESH) const;
   void copyGrayscaleLsbBuffers() const;
   void copyGrayscaleMsbBuffers() const;
-  void displayGrayBuffer() const;
+  void displayGrayBuffer(const unsigned char* lut = nullptr, bool factoryMode = false) const;
+  // LUT for a GrayscaleMode (nullptr = driver default for the selected mode).
+  static const unsigned char* grayscaleLutFor(GrayscaleMode mode);
+  // Tone calibration that image decoding should target for this page.
+  void setImageToneMode(const GrayscaleMode mode) const { imageToneMode = mode; }
+  GrayscaleMode getImageToneMode() const { return imageToneMode; }
   void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch, int yStart, int numRows) const;
   bool supportsStripGrayscale() const;
   bool storeBwBuffer();    // Returns true if buffer was stored successfully
@@ -252,9 +301,10 @@ class GfxRenderer {
 
 class GfxStripTargetScope {
  public:
-  GfxStripTargetScope(const GfxRenderer& renderer, uint8_t* scratch, const int stripY0, const int stripRows)
+  GfxStripTargetScope(const GfxRenderer& renderer, uint8_t* scratch, const int stripY0, const int stripRows,
+                      uint8_t* scratchMsb = nullptr)
       : renderer_(renderer), active_(true) {
-    renderer_.beginStripTarget(scratch, stripY0, stripRows);
+    renderer_.beginStripTarget(scratch, stripY0, stripRows, scratchMsb);
   }
   GfxStripTargetScope(const GfxStripTargetScope&) = delete;
   GfxStripTargetScope& operator=(const GfxStripTargetScope&) = delete;

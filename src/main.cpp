@@ -16,6 +16,7 @@
 #include <WiFi.h>
 #include <builtinFonts/all.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "AchievementsStore.h"
@@ -32,13 +33,16 @@
 #include "UiFontSelection.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BootRecovery.h"
 #include "util/ButtonNavigator.h"
 #include "util/CprVcodexLogs.h"
+#include "util/PowerShortcutState.h"
 #include "util/ScreenshotUtil.h"
 #include "util/TimeUtils.h"
+#include "util/WebUploadRecovery.h"
 #include "version.h"
 
 MappedInputManager mappedInputManager(gpio);
@@ -178,6 +182,64 @@ constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 // Latched once deep sleep is committed. WiFi activities also restart silently
 // from onExit(), but deep sleep already gives us a clean heap on wake.
 static bool deepSleepInProgress = false;
+static PowerShortcutState powerShortcuts;
+
+namespace {
+struct QuickLockBackdrop {
+  static constexpr int SIZE = 40;
+  uint8_t bytes[6 * SIZE] = {};  // A 40px square touches at most six bytes per row in every orientation.
+  int x = 0;
+  int y = 0;
+  size_t byteCount = 0;
+  GfxRenderer::Orientation orientation = GfxRenderer::Orientation::Portrait;
+  bool valid = false;
+  void save() {
+    int top, right, bottom, left;
+    renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+    x = std::max(left, renderer.getScreenWidth() - right - SIZE);
+    y = std::max(top, renderer.getScreenHeight() - bottom - SIZE);
+    orientation = renderer.getOrientation();
+    byteCount = renderer.getRegionByteSize(x, y, SIZE, SIZE);
+    valid = byteCount <= sizeof(bytes) && renderer.copyRegionToBuffer(x, y, SIZE, SIZE, bytes, byteCount);
+  }
+  bool restore() {
+    if (!valid || orientation != renderer.getOrientation()) return false;
+    valid = false;
+    return renderer.copyBufferToRegion(x, y, SIZE, SIZE, bytes, byteCount);
+  }
+};
+QuickLockBackdrop quickLockBackdrop;
+
+void notifyQuickLockChanged() {
+  halTiltSensor.clearPendingEvents();
+  if (powerShortcuts.isLocked()) {
+    // Drain the last queued page render before saving the small badge region.
+    activityManager.requestUpdateAndWait();
+    RenderLock lock;
+    if (activityManager.isReaderActivity()) READING_STATS.noteActivity();
+    quickLockBackdrop.save();
+    if (quickLockBackdrop.valid) {
+      const int x = quickLockBackdrop.x;
+      const int y = quickLockBackdrop.y;
+      renderer.fillRect(x, y, QuickLockBackdrop::SIZE, QuickLockBackdrop::SIZE, false);
+      renderer.drawRoundedRect(x + 12, y + 4, 16, 22, 4, 8, true);
+      renderer.fillRect(x + 7, y + 19, 26, 16, true);
+      renderer.fillRect(x + 18, y + 25, 4, 6, false);
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    }
+  } else {
+    bool restored;
+    {
+      RenderLock lock;
+      // Keep the same session and counters, excluding the whole locked interval.
+      READING_STATS.resumeSession();
+      restored = quickLockBackdrop.restore();
+      if (restored) renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    }
+    if (!restored) activityManager.requestUpdateAndWait();
+  }
+}
+}  // namespace
 
 void silentRestart() {
   if (deepSleepInProgress) return;
@@ -253,11 +315,19 @@ void waitForPowerRelease() {
 // Enter deep sleep mode
 void enterDeepSleep() {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
+  if (powerShortcuts.isLocked()) {
+    RenderLock lock;
+    READING_STATS.resumeSession();  // onExit must not count the locked time when ending the session.
+  }
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
-  APP_STATE.saveToFile();
 
   deepSleepInProgress = true;
   activityManager.goToSleep();
+
+  // Persist only after the sleep screen has been rendered. Serializing state
+  // while a reader is still alive fragments the heap immediately before the
+  // large contiguous allocation required by PNGdec.
+  APP_STATE.saveToFile();
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(true);
@@ -314,6 +384,9 @@ void setup() {
   t1 = millis();
 
   HalSystem::begin();
+  // checkPanic() consumes the watchdog capture marker after a successful SD
+  // dump, so keep the boot classification for the later route decision.
+  const bool rebootedFromPanic = HalSystem::isRebootFromPanic();
 
   const bool isSilentReboot = (silentRebootMagic == SILENT_REBOOT_MAGIC);
   const uint32_t snapshotTarget =
@@ -352,6 +425,11 @@ void setup() {
     activityManager.goToFullScreenMessage("SD card error", EpdFontFamily::BOLD);
     return;
   }
+  if (!WebUploadRecovery::recover(Storage)) {
+    LOG_ERR("MAIN", "Upload recovery needs attention; preserved previous files");
+  }
+  // Stamp all SdFat creates/syncs with RTC time when available, else last Sync Day.
+  TimeUtils::registerSdFatDateTimeCallback();
 
   HalSystem::checkPanic();
   BootRecovery::initialize();
@@ -407,6 +485,23 @@ void setup() {
     case HalGPIO::WakeupReason::Other:
     default:
       break;
+  }
+
+  // Recovery firmware mode: hold the upper side button (BTN_UP) together with
+  // Power while waking to jump directly to the SD firmware picker. This is the
+  // only practical recovery route on USB-locked X3 devices, so sample the raw
+  // hardware button after InputManager's debounce state has settled.
+  bool recoveryFirmwareMode = false;
+  if (wakeupReason == HalGPIO::WakeupReason::PowerButton) {
+    const unsigned long settleStart = millis();
+    while (millis() - settleStart < 500) {
+      gpio.update();
+      delay(10);
+    }
+    if (gpio.isPressed(HalGPIO::BTN_UP)) {
+      recoveryFirmwareMode = true;
+      LOG_INF("MAIN", "Recovery firmware mode (UP + POWER held at boot)");
+    }
   }
 
   // First serial output only here to avoid timing inconsistencies for power button press duration verification
@@ -481,7 +576,12 @@ void setup() {
   const uint8_t syncDayReminderThreshold = SETTINGS.getEffectiveSyncDayReminderStartThreshold();
   BootRecovery::enterStage(BootRecovery::BootStage::RouteDecision);
 
-  if (HalSystem::isRebootFromPanic() && !forceHomeBoot) {
+  if (recoveryFirmwareMode) {
+    // Skip normal home/reader routing and keep recovery self-contained: Back
+    // cannot escape the firmware picker while recoveryMode is true.
+    activityManager.replaceActivity(
+        std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true));
+  } else if (rebootedFromPanic && !forceHomeBoot) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
   } else if (isSilentReboot && snapshotTarget == SILENT_REBOOT_TARGET_READER && !APP_STATE.openEpubPath.empty()) {
@@ -533,7 +633,9 @@ void loop() {
 #endif
 
   gpio.update();
-  halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
+  if (!powerShortcuts.isLocked()) {
+    halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
+  }
 
   renderer.setFadingFix(SETTINGS.fadingFix);
   renderer.setDarkMode(SETTINGS.darkMode);
@@ -572,18 +674,42 @@ void loop() {
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
   }
 
-  static bool screenshotButtonsReleased = true;
-  if (gpio.isPressed(HalGPIO::BTN_POWER) && gpio.isPressed(HalGPIO::BTN_DOWN)) {
-    if (screenshotButtonsReleased) {
-      screenshotButtonsReleased = false;
-      {
-        RenderLock lock;
-        ScreenshotUtil::takeScreenshot(renderer);
-      }
-    }
+  const bool powerPressed = gpio.isPressed(HalGPIO::BTN_POWER);
+  const bool shortPowerRelease =
+      gpio.wasReleased(HalGPIO::BTN_POWER) && gpio.getPowerButtonHeldTime() < SETTINGS.getPowerButtonDuration();
+  // Transfers and flashing must keep servicing their activity loop. Quick Lock
+  // is available again once that activity releases its no-sleep guard.
+  const bool enableQuickLock =
+      SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::QUICK_LOCK && !activityManager.preventAutoSleep();
+  bool anyButtonPressed = false;
+  for (uint8_t button = HalGPIO::BTN_BACK; button <= HalGPIO::BTN_POWER; ++button) {
+    anyButtonPressed = anyButtonPressed || gpio.isPressed(button);
+  }
+  const auto shortcut = powerShortcuts.update(millis(), powerPressed, gpio.isPressed(HalGPIO::BTN_DOWN),
+                                              shortPowerRelease, enableQuickLock, anyButtonPressed);
+  if (shortcut.event == PowerShortcutState::Event::LockChanged) {
+    notifyQuickLockChanged();
+    lastActivityTime = millis();
+    delay(10);
     return;
-  } else {
-    screenshotButtonsReleased = true;
+  }
+  if (powerShortcuts.isLocked()) {
+    if (powerShortcuts.shouldSleep(millis(), SETTINGS.getSleepTimeoutMs()) ||
+        (powerPressed && !gpio.isPressed(HalGPIO::BTN_DOWN) &&
+         gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration())) {
+      enterDeepSleep();
+    }
+    powerManager.setPowerSaving(true);
+    delay(50);
+    return;
+  }
+  if (shortcut.event == PowerShortcutState::Event::Screenshot) {
+    RenderLock lock;
+    ScreenshotUtil::takeScreenshot(renderer);
+  }
+  if (shortcut.consume) {
+    delay(10);
+    return;
   }
 
   const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
@@ -608,8 +734,10 @@ void loop() {
   if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
       mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
     LOG_DBG("MAIN", "Manual screen refresh triggered");
-    RenderLock lock;
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    if (!activityManager.handleForcedRefresh()) {
+      RenderLock lock;
+      renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    }
   }
 
   // Refresh the battery icon when USB is plugged or unplugged.

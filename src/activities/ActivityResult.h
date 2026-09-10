@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 struct WifiResult {
   bool connected = false;
@@ -39,12 +40,25 @@ struct PageResult {
 struct BookmarkResult {
   int spineIndex = 0;
   uint32_t page = 0;
+  bool hasVisibleTextOffset = false;
+  uint32_t visibleTextOffset = 0;
+};
+
+struct HighlightFragment {
+  std::string text;
+  uint16_t spineIndex = 0;
+  uint16_t pageNumber = 0;
+  uint16_t startWordIndex = 0;
+  uint16_t endWordIndex = 0;
+  uint32_t visibleTextOffset = 0;
 };
 
 struct HighlightResult {
   std::string text;
   uint16_t startWordIndex = 0;
   uint16_t endWordIndex = 0;
+  // Multi-page selections persist as independently anchored v5 fragments.
+  std::vector<HighlightFragment> fragments;
 };
 
 struct SyncResult {
