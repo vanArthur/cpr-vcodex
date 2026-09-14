@@ -291,7 +291,7 @@ metrics.
 | Class | File | Role |
 |---|---|---|
 | `HalDisplay` | `lib/hal/HalDisplay.h` | Hardware abstraction. Globally available as `display` |
-| `EInkDisplay` | `open-x4-sdk/libs/display/EInkDisplay/` | SPI driver for SSD1677 (X4) / UC81xx (X3) |
+| `EInkDisplay` | `freeink-sdk/libs/display/FreeInkDisplay/` | SPI driver for SSD1677 (X4) / UC81xx (X3) |
 
 `HalDisplay` mirrors a subset of GfxRenderer methods but operates in **physical
 panel coordinates**:

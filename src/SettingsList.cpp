@@ -147,6 +147,7 @@ std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry) {
     sleepScreenValues[CrossPointSettings::CUSTOM_STATS_V2] = StrId::STR_CUSTOM_STATS_V2;
     sleepScreenValues[CrossPointSettings::QUICK_RESUME] = StrId::STR_QUICK_RESUME;
     sleepScreenValues[CrossPointSettings::TRANSPARENT_CUSTOM] = StrId::STR_TRANSPARENT;
+    sleepScreenValues[CrossPointSettings::READING_HEATMAP] = StrId::STR_SLEEP_HEATMAP;
 
     std::vector<StrId> uiThemeValues(CrossPointSettings::UI_THEME_COUNT);
     uiThemeValues[CrossPointSettings::LYRA] = StrId::STR_THEME_LYRA;
@@ -348,12 +349,6 @@ std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry) {
             StrId::STR_READING_STATS_AUTOBACKUP, &CrossPointSettings::readingStatsAutoBackup,
             {StrId::STR_STATE_OFF, StrId::STR_NUM_1, StrId::STR_NUM_7, StrId::STR_NUM_14, StrId::STR_NUM_21},
             "readingStatsAutoBackup", StrId::STR_APPS),
-        SettingInfo::Enum(StrId::STR_STUDY_MODE, &CrossPointSettings::flashcardStudyMode,
-                          {StrId::STR_DUE, StrId::STR_SCHEDULED, StrId::STR_RANDOM_PRACTICE, StrId::STR_SEQUENTIAL},
-                          "flashcardStudyMode", StrId::STR_APPS),
-        SettingInfo::Enum(StrId::STR_SESSION_SIZE, &CrossPointSettings::flashcardSessionSize,
-                          {StrId::STR_NUM_10, StrId::STR_NUM_20, StrId::STR_NUM_30, StrId::STR_NUM_50, StrId::STR_ALL},
-                          "flashcardSessionSize", StrId::STR_APPS),
         SettingInfo::Toggle(StrId::STR_SHOW_AFTER_READING, &CrossPointSettings::showStatsAfterReading,
                             "showStatsAfterReading", StrId::STR_APPS),
         // Upstream's moveFinishedToReadFolder aliases this field.
@@ -395,9 +390,6 @@ std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry) {
                           StrId::STR_SHORTCUTS_SECTION),
         SettingInfo::Enum(StrId::STR_FAVORITES, &CrossPointSettings::favoritesShortcut,
                           {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "favoritesShortcut",
-                          StrId::STR_SHORTCUTS_SECTION),
-        SettingInfo::Enum(StrId::STR_FLASHCARDS, &CrossPointSettings::flashcardsShortcut,
-                          {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "flashcardsShortcut",
                           StrId::STR_SHORTCUTS_SECTION),
         SettingInfo::Enum(StrId::STR_DICTIONARY, &CrossPointSettings::dictionaryShortcut,
                           {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "dictionaryShortcut",

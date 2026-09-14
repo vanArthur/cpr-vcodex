@@ -250,6 +250,8 @@ constexpr StrId OPT_SLEEP_SCREEN[] = {StrId::STR_DARK,
                                       StrId::STR_COVER_STATS_V2,
                                       StrId::STR_CUSTOM_STATS,
                                       StrId::STR_CUSTOM_STATS_V2,
+                                      StrId::STR_QUICK_RESUME,
+                                      StrId::STR_TRANSPARENT,
                                       StrId::STR_SLEEP_HEATMAP};
 constexpr StrId OPT_FIT_CROP[] = {StrId::STR_FIT, StrId::STR_CROP};
 constexpr StrId OPT_SLEEP_FILTER[] = {StrId::STR_NONE_OPT, StrId::STR_FILTER_CONTRAST, StrId::STR_INVERTED};
@@ -284,10 +286,6 @@ constexpr StrId OPT_DATE_FORMAT[] = {StrId::STR_DATE_FORMAT_DD_MM_YYYY, StrId::S
 constexpr StrId OPT_DAILY_GOAL[] = {StrId::STR_MIN_15, StrId::STR_MIN_30, StrId::STR_MIN_45, StrId::STR_MIN_60};
 constexpr StrId OPT_STATS_AUTOBACKUP[] = {StrId::STR_STATE_OFF, StrId::STR_NUM_1, StrId::STR_NUM_7, StrId::STR_NUM_14,
                                           StrId::STR_NUM_21};
-constexpr StrId OPT_STUDY_MODE[] = {StrId::STR_DUE, StrId::STR_SCHEDULED, StrId::STR_RANDOM_PRACTICE,
-                                    StrId::STR_SEQUENTIAL};
-constexpr StrId OPT_SESSION_SIZE[] = {StrId::STR_NUM_10, StrId::STR_NUM_20, StrId::STR_NUM_30, StrId::STR_NUM_50,
-                                      StrId::STR_ALL};
 constexpr StrId OPT_HOME_BOOK_SOURCE[] = {StrId::STR_RECENTS, StrId::STR_FAVORITES};
 constexpr StrId OPT_SHORTCUT_LOCATION[] = {StrId::STR_HOME_LOCATION, StrId::STR_APPS};
 constexpr StrId OPT_KO_MATCH[] = {StrId::STR_FILENAME, StrId::STR_BINARY};

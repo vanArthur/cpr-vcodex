@@ -7,7 +7,9 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
+#include "ReadingStatsStore.h"
 #include "components/UITheme.h"
+#include "util/ReadingStatsAnalytics.h"
 
 namespace fui = freeink::ui;
 
@@ -40,6 +42,7 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
 void EpubReaderMenuActivity::buildMenuItems(std::vector<MenuItem>& items, const bool hasFootnotes) {
   items.clear();
   items.reserve(MAX_MENU_ITEMS);
+  items.push_back({MenuAction::SESSION_LENGTH, StrId::STR_SESSION_LENGTH});
   items.push_back({MenuAction::READER_SETTINGS, StrId::STR_READING_QUICK_SETTINGS});
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
   if (hasFootnotes) {
@@ -88,6 +91,10 @@ void EpubReaderMenuActivity::activateIndex(const int index) {
   nav.selected = index;
 
   const auto selectedAction = menuItems[index].action;
+  if (selectedAction == MenuAction::SESSION_LENGTH) {
+    // Display-only row: stay in the menu.
+    return;
+  }
   if (selectedAction == MenuAction::ROTATE_SCREEN) {
     optionPopup.show(StrId::STR_ORIENTATION, orientationLabels.data(), static_cast<int>(orientationLabels.size()),
                      pendingOrientation, [this](int idx) {
@@ -190,6 +197,9 @@ void EpubReaderMenuActivity::buildScreen(UiScreen& screen) {
       menuRowItems[i].value = I18N.get(SETTINGS.darkMode ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF);
     } else if (action == MenuAction::FRONTLIGHT) {
       menuRowItems[i].value = I18N.get(Frontlight.isOn() ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF);
+    } else if (action == MenuAction::SESSION_LENGTH) {
+      sessionLengthText = ReadingStatsAnalytics::formatDurationHm(READING_STATS.getCurrentSessionMs());
+      menuRowItems[i].value = sessionLengthText.c_str();
     }
   }
 

@@ -43,7 +43,6 @@
 #include "activities/apps/AchievementsActivity.h"
 #include "activities/apps/BookmarksAppActivity.h"
 #include "activities/apps/FavoritesAppActivity.h"
-#include "activities/apps/FlashcardsAppActivity.h"
 #include "activities/apps/IfFoundActivity.h"
 #include "activities/apps/ReadingHeatmapActivity.h"
 #include "activities/apps/ReadingProfileActivity.h"
@@ -93,6 +92,7 @@ std::vector<StrId> buildSleepScreenValues() {
   values[CrossPointSettings::CUSTOM_STATS_V2] = StrId::STR_CUSTOM_STATS_V2;
   values[CrossPointSettings::QUICK_RESUME] = StrId::STR_QUICK_RESUME;
   values[CrossPointSettings::TRANSPARENT_CUSTOM] = StrId::STR_TRANSPARENT;
+  values[CrossPointSettings::READING_HEATMAP] = StrId::STR_SLEEP_HEATMAP;
   return values;
 }
 
@@ -370,15 +370,6 @@ std::vector<SettingInfo> buildAppSettings() {
   v.push_back(SettingInfo::Action(StrId::STR_SLEEP, SettingAction::SleepApp));
   v.push_back(SettingInfo::Action(StrId::STR_IF_FOUND_RETURN_ME, SettingAction::IfFound));
 
-  v.push_back(SettingInfo::Section(StrId::STR_FLASHCARDS));
-  v.push_back(SettingInfo::Action(StrId::STR_FLASHCARDS, SettingAction::Flashcards));
-  v.push_back(
-      SettingInfo::Enum(StrId::STR_STUDY_MODE, &CrossPointSettings::flashcardStudyMode,
-                        {StrId::STR_DUE, StrId::STR_SCHEDULED, StrId::STR_RANDOM_PRACTICE, StrId::STR_SEQUENTIAL}));
-  v.push_back(
-      SettingInfo::Enum(StrId::STR_SESSION_SIZE, &CrossPointSettings::flashcardSessionSize,
-                        {StrId::STR_NUM_10, StrId::STR_NUM_20, StrId::STR_NUM_30, StrId::STR_NUM_50, StrId::STR_ALL}));
-
   v.push_back(SettingInfo::Section(StrId::STR_SHORTCUTS_SECTION));
   v.push_back(SettingInfo::Action(StrId::STR_SHORTCUT_LOCATION, SettingAction::ShortcutLocation));
   v.push_back(SettingInfo::Action(StrId::STR_SHORTCUT_VISIBILITY, SettingAction::ShortcutVisibility));
@@ -471,10 +462,6 @@ std::string getActionValueText(const SettingInfo& setting) {
     }
     case SettingAction::Achievements: {
       const auto* definition = findShortcutDefinition(ShortcutId::Achievements);
-      return definition ? ShortcutUiMetadata::getSubtitle(*definition) : "";
-    }
-    case SettingAction::Flashcards: {
-      const auto* definition = findShortcutDefinition(ShortcutId::Flashcards);
       return definition ? ShortcutUiMetadata::getSubtitle(*definition) : "";
     }
     case SettingAction::ScreenClean: {
@@ -1033,9 +1020,6 @@ void SettingsActivity::runAction(const SettingInfo& setting) {
       break;
     case SettingAction::Favorites:
       startActivityForResult(std::make_unique<FavoritesAppActivity>(renderer, mappedInput), resultHandler);
-      break;
-    case SettingAction::Flashcards:
-      startActivityForResult(std::make_unique<FlashcardsAppActivity>(renderer, mappedInput), resultHandler);
       break;
     case SettingAction::ScreenClean:
       startActivityForResult(std::make_unique<ScreenCleanActivity>(renderer, mappedInput), resultHandler);

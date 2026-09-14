@@ -55,6 +55,7 @@
 #include "util/BookIdentity.h"
 #include "util/ButtonNavigator.h"
 #include "util/CompletedBookMover.h"
+#include "util/ReadingStatsAnalytics.h"
 #include "util/ScreenshotUtil.h"
 #include "util/TaskWatchdog.h"
 
@@ -1595,6 +1596,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       }
       break;
     }
+    case EpubReaderMenuActivity::MenuAction::SESSION_LENGTH:
+      // Display-only row: nothing to do.
+      break;
   }
 }
 
@@ -3170,6 +3174,8 @@ std::string EpubReaderActivity::moreRowValue(int row) const {
       return SETTINGS.darkMode ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case MA::FRONTLIGHT:
       return Frontlight.isOn() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case MA::SESSION_LENGTH:
+      return ReadingStatsAnalytics::formatDurationHm(READING_STATS.getCurrentSessionMs());
     default:
       return "";
   }
@@ -3181,6 +3187,9 @@ void EpubReaderActivity::activateMoreRow(int row) {
   const auto action = moreItems[row].action;
   // In-place toggles keep the panel open and re-render the page beneath it.
   switch (action) {
+    case MA::SESSION_LENGTH:
+      // Display-only row: keep the panel open.
+      return;
     case MA::ROTATE_SCREEN: {
       static constexpr StrId kOrientIds[] = {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW,
                                              StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW};

@@ -14,6 +14,7 @@ class EpubReaderMenuActivity final : public UiListActivity {
   // dictionary history/manager, highlights, page marks, mark-as-finished) plus
   // upstream's in-place night mode / frontlight toggles.
   enum class MenuAction {
+    SESSION_LENGTH,
     READER_SETTINGS,
     SELECT_CHAPTER,
     FOOTNOTES,
@@ -77,6 +78,9 @@ class EpubReaderMenuActivity final : public UiListActivity {
 
   // Fixed menu layout
   std::vector<MenuItem> menuItems;
+  // Backing store for the session-length row value (ListItem::value is a
+  // non-owning pointer, so the text must live in the activity).
+  std::string sessionLengthText;
 
   OptionPopup optionPopup;
   std::string title = "Reader Menu";
