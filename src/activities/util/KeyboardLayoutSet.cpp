@@ -1,68 +1,66 @@
 #include "KeyboardLayoutSet.h"
 
-#include "KeyboardText.h"
-namespace KeyboardLayoutSet {
+#include "CrossPointSettings.h"
+
+namespace keyboard_layouts {
+
 namespace {
-struct Layout {
-  const char* name;
-  int columns;
-  const char* normal[4];
-  const char* shifted[4];
-};
-constexpr Layout layouts[] = {
-    {"QWERTY",
-     10,
-     {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm=.,"},
-     {"!@#$%^&*()", "QWERTYUIOP", "ASDFGHJKL_", "ZXCVBNM+><"}},
-    {"AZERTY",
-     10,
-     {"1234567890", "azertyuiop", "qsdfghjklm", "wxcvbnéèàç"},
-     {"!@#$%^&*()", "AZERTYUIOP", "QSDFGHJKLM", "WXCVBNÉÈÀÇ"}},
-    {"QWERTZ",
-     11,
-     {"1234567890ß", "qwertzuiopü", "asdfghjklöä", "yxcvbnm=.,-"},
-     {"!@#$%^&*()ß", "QWERTZUIOPÜ", "ASDFGHJKLÖÄ", "YXCVBNM+><_"}},
-    {"Español",
-     11,
-     {"1234567890'", "qwertyuiopá", "asdfghjklñé", "zxcvbnmíóúü"},
-     {"!@#$%^&*()?", "QWERTYUIOPÁ", "ASDFGHJKLÑÉ", "ZXCVBNMÍÓÚÜ"}},
-    {"Кириллица",
-     11,
-     {"1234567890ё", "йцукенгшщзх", "фывапролджэ", "ячсмитьбюъ."},
-     {"!@#$%^&*()Ё", "ЙЦУКЕНГШЩЗХ", "ФЫВАПРОЛДЖЭ", "ЯЧСМИТЬБЮЪ,"}},
-};
-uint32_t at(const char* text, int column) {
-  for (int i = 0; text[0]; ++i) {
-    uint32_t cp = 0;
-    const size_t bytes = KeyboardText::decode(text, cp);
-    if (i == column) return cp;
-    text += bytes;
+
+uint8_t indexOf(const freeink::ui::KeyboardLayoutId id) {
+  for (uint8_t i = 0; i < COUNT; ++i) {
+    if (ALL[i].id == id) return i;
   }
-  return 0;
+  return COUNT;
 }
+
+freeink::ui::KeyboardLayoutId forLanguage(const Language language) {
+  for (uint8_t i = 0; i < COUNT; ++i) {
+    if (ALL[i].language == language) return ALL[i].id;
+  }
+  return freeink::ui::KeyboardLayoutId::QwertyEn;
+}
+
+constexpr uint16_t ALL_BITS = static_cast<uint16_t>((uint32_t{1} << COUNT) - 1);
+
+uint16_t layoutBit(const freeink::ui::KeyboardLayoutId id) {
+  const uint8_t i = indexOf(id);
+  return i < COUNT ? bitAt(i) : 0;
+}
+
 }  // namespace
-uint8_t first(uint8_t mask) {
-  mask = normalizeMask(mask);
-  for (uint8_t id = 0; id < COUNT; ++id)
-    if (mask & (1u << id)) return id;
-  return Qwerty;
-}
-uint8_t next(uint8_t mask, uint8_t current) {
-  mask = normalizeMask(mask);
-  for (uint8_t step = 1; step <= COUNT; ++step) {
-    const uint8_t id = (current + step) % COUNT;
-    if (mask & (1u << id)) return id;
+
+uint16_t enabled() {
+  // Drop bits naming no layout: the mask comes from a hand-editable file and
+  // survives downgrades, so it can carry bits this build does not have. Left
+  // in, such a mask would read as "configured" while enabling nothing.
+  const uint16_t configured = static_cast<uint16_t>(SETTINGS.keyboardLayouts & ALL_BITS);
+  if (configured != 0) {
+    if (configured & LATIN_BITS) return configured;
+    return static_cast<uint16_t>(configured | layoutBit(freeink::ui::KeyboardLayoutId::QwertyEn));
   }
-  return Qwerty;
+  // Unconfigured: the UI language's layout plus English. An English UI collapses
+  // to one layout and the language key disappears -- there is nowhere to go.
+  return static_cast<uint16_t>(layoutBit(forLanguage(I18N.getLanguage())) |
+                               layoutBit(freeink::ui::KeyboardLayoutId::QwertyEn));
 }
-int columns(uint8_t id) { return layouts[id < COUNT ? id : Qwerty].columns; }
-const char* name(uint8_t id) { return layouts[id < COUNT ? id : Qwerty].name; }
-const char* rowText(uint8_t id, int row, bool shifted) {
-  if (id >= COUNT || row < 0 || row >= 4) return "";
-  return shifted ? layouts[id].shifted[row] : layouts[id].normal[row];
+
+freeink::ui::KeyboardLayoutId startingLayout() {
+  const freeink::ui::KeyboardLayoutId preferred = forLanguage(I18N.getLanguage());
+  if (enabled() & layoutBit(preferred)) return preferred;
+  // Switched off: opening on it anyway would ignore a deliberate choice.
+  return next(preferred);
 }
-KeyDef key(uint8_t id, int row, int column) {
-  if (id >= COUNT || row < 0 || row >= 4 || column < 0 || column >= columns(id)) return {};
-  return {at(layouts[id].normal[row], column), at(layouts[id].shifted[row], column)};
+
+freeink::ui::KeyboardLayoutId next(const freeink::ui::KeyboardLayoutId current) {
+  const uint16_t mask = enabled();
+  const uint8_t from = indexOf(current);
+  // A current layout the table does not list still has to lead somewhere.
+  const uint8_t start = from < COUNT ? from : 0;
+  for (uint8_t step = 1; step <= COUNT; ++step) {
+    const uint8_t i = static_cast<uint8_t>((start + step) % COUNT);
+    if (mask & bitAt(i)) return ALL[i].id;
+  }
+  return current;
 }
-}  // namespace KeyboardLayoutSet
+
+}  // namespace keyboard_layouts

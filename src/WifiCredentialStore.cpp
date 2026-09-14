@@ -47,7 +47,6 @@ bool WifiCredentialStore::saveToFileUnlocked() const {
 
 bool WifiCredentialStore::loadFromFile() {
   std::lock_guard<std::mutex> lock(persistenceMutex);
-  JsonSettingsIO::recoverFile(WIFI_FILE_JSON);
   const std::string tempPath = std::string(WIFI_FILE_JSON) + ".tmp";
   if (!Storage.exists(WIFI_FILE_JSON) && Storage.exists(tempPath.c_str())) {
     if (Storage.rename(tempPath.c_str(), WIFI_FILE_JSON)) {
@@ -87,7 +86,7 @@ bool WifiCredentialStore::loadFromFile() {
 }
 
 bool WifiCredentialStore::loadFromBinaryFile() {
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForRead("WCS", WIFI_FILE_BIN, file)) {
     return false;
   }
@@ -175,6 +174,33 @@ std::optional<WifiCredential> WifiCredentialStore::findCredential(const std::str
 
   if (cred != credentials.end()) return *cred;
   return std::nullopt;
+}
+
+std::optional<WifiCredential> WifiCredentialStore::getCredentialAt(const size_t index) const {
+  std::lock_guard<std::mutex> lock(credentialMutex);
+  if (index >= credentials.size()) return std::nullopt;
+  return credentials[index];
+}
+
+std::optional<std::string> WifiCredentialStore::getSsidAt(const size_t index) const {
+  std::lock_guard<std::mutex> lock(credentialMutex);
+  if (index >= credentials.size()) return std::nullopt;
+  return credentials[index].ssid;
+}
+
+size_t WifiCredentialStore::getCredentialCount() const {
+  std::lock_guard<std::mutex> lock(credentialMutex);
+  return credentials.size();
+}
+
+std::vector<WifiCredentialSummary> WifiCredentialStore::getCredentialSummaries() const {
+  std::lock_guard<std::mutex> lock(credentialMutex);
+  std::vector<WifiCredentialSummary> summaries;
+  summaries.reserve(credentials.size());
+  for (const auto& credential : credentials) {
+    summaries.push_back({credential.ssid, !credential.password.empty(), credential.ssid == lastConnectedSsid});
+  }
+  return summaries;
 }
 
 bool WifiCredentialStore::hasCredentials() const {

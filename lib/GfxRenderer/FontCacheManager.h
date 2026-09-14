@@ -15,13 +15,19 @@ class FontCacheManager {
   void setFontDecompressor(FontDecompressor* d);
 
   void clearCache();
-  bool prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F);
+  // Release every rebuildable SD-font cache (mini glyph/kern arenas, kern/lig
+  // class tables, overflow rings, advance tables) while keeping the fonts
+  // loaded. Everything faults back in on demand. For heap-critical transitions
+  // (e.g. web-server + WiFi startup); see SdCardFont::releaseResidentCaches().
+  void releaseSdFontCaches();
+  void prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F);
   void logStats(const char* label = "render");
   void resetStats();
 
   // Scan-mode API: called by GfxRenderer::drawText() during scan pass
   bool isScanning() const;
   void recordText(const char* text, int fontId, EpdFontFamily::Style style);
+  void recordStyle(int fontId, EpdFontFamily::Style style);
 
   // The FontDecompressor pointer, needed by GfxRenderer::getGlyphBitmap()
   FontDecompressor* getDecompressor() const { return fontDecompressor_; }
@@ -31,7 +37,7 @@ class FontCacheManager {
    public:
     explicit PrewarmScope(FontCacheManager& manager);
     ~PrewarmScope();
-    bool endScanAndPrewarm();
+    void endScanAndPrewarm();
     PrewarmScope(PrewarmScope&& other) noexcept;
     PrewarmScope& operator=(PrewarmScope&&) = delete;
     PrewarmScope(const PrewarmScope&) = delete;

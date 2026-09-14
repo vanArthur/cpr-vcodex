@@ -9,8 +9,6 @@
 #include <memory>
 #include <string>
 
-#include "WebUploadTransaction.h"
-
 // Structure to hold file information
 struct FileInfo {
   String name;
@@ -34,8 +32,7 @@ class CrossPointWebServer {
 
   // Used by POST upload handler
   struct UploadState {
-    FsFile file;
-    WebUploadTransaction transaction;
+    HalFile file;
     String fileName;
     String path = "/";
     size_t size = 0;
@@ -111,6 +108,11 @@ class CrossPointWebServer {
   void handleGetSettings() const;
   void handlePostSettings();
 
+  // Wi-Fi credentials handlers
+  void handleGetWifiNetworks() const;
+  void handlePostWifiNetwork();
+  void handleDeleteWifiNetwork();
+
   // Font management handlers
   void handleFontsPage() const;
   void handleFontList() const;
@@ -125,11 +127,9 @@ class CrossPointWebServer {
 
   // Font upload state
   struct FontUploadState {
-    FsFile file;
+    HalFile file;
     std::string familyName;
     std::string filePath;
-    std::string temporaryPath;
-    std::string backupPath;
     bool valid = false;
     bool magicChecked = false;
     size_t bytesWritten = 0;

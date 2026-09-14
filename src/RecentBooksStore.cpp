@@ -195,6 +195,22 @@ bool RecentBooksStore::updateBookPath(const std::string& oldKey, const std::stri
   return true;
 }
 
+void RecentBooksStore::updatePath(const std::string& oldPath, const std::string& newPath,
+                                  const std::string& oldCachePath, const std::string& newCachePath) {
+  const int existingIndex = findBookIndex(oldPath, "");
+  if (existingIndex < 0) {
+    return;
+  }
+
+  std::string coverBmpPath;
+  const RecentBook& existing = recentBooks[existingIndex];
+  if (!oldCachePath.empty() && !existing.coverBmpPath.empty() && existing.coverBmpPath.rfind(oldCachePath, 0) == 0) {
+    coverBmpPath = newCachePath + existing.coverBmpPath.substr(oldCachePath.size());
+  }
+  // updateBookPath keeps the existing title/author/cover when the overrides are empty and persists.
+  updateBookPath(oldPath, newPath, "", "", coverBmpPath, existing.bookId);
+}
+
 bool RecentBooksStore::removeBook(const std::string& key) {
   const int existingIndex = findBookIndex(key, key);
   if (existingIndex < 0) {
@@ -253,7 +269,6 @@ RecentBook RecentBooksStore::getDataFromBook(std::string path) const {
 }
 
 bool RecentBooksStore::loadFromFile() {
-  JsonSettingsIO::recoverFile(RECENT_BOOKS_FILE_JSON);
   const std::string tempPath = std::string(RECENT_BOOKS_FILE_JSON) + ".tmp";
   if (!Storage.exists(RECENT_BOOKS_FILE_JSON) && Storage.exists(tempPath.c_str())) {
     if (Storage.rename(tempPath.c_str(), RECENT_BOOKS_FILE_JSON)) {
@@ -283,7 +298,7 @@ bool RecentBooksStore::loadFromFile() {
 }
 
 bool RecentBooksStore::loadFromBinaryFile() {
-  FsFile inputFile;
+  HalFile inputFile;
   if (!Storage.openFileForRead("RBS", RECENT_BOOKS_FILE_BIN, inputFile)) {
     return false;
   }

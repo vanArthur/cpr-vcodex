@@ -23,8 +23,15 @@ skill from `.agents/skills/`; for deeper project details, read the linked
 
 ## Always-On Rules
 
-- Preserve stability over feature size. The ESP32-C3 has about 380 KB usable RAM
-  and no PSRAM.
+- Preserve stability over feature size. The default/`gh_release` builds target
+  the ESP32-C3 (Xteink X4/X3), which has about 380 KB usable RAM and no PSRAM.
+  X4 Pro distribution is withdrawn; `x4pro*` environments are compile-only
+  maintainer tools and must not produce public binaries, Pages entries, or
+  release assets until the withdrawal is explicitly reversed.
+- The X4 Pro build (`x4pro`, `x4pro-gh_release`, `x4pro-gh_release_rc` envs)
+  runs on a dual-core ESP32-S3, so SMP rules apply: never pass NULL spinlocks to
+  FreeRTOS critical sections, keep the render task pinned to one core, and do
+  not assume single-core ordering between tasks.
 - Prefer existing project patterns and nearby code over new abstractions.
 - Inspect relevant files with `rg` before changing firmware behavior.
 - User-facing device text must use the `tr()` i18n flow. Logs may be plain text.
@@ -35,7 +42,8 @@ skill from `.agents/skills/`; for deeper project details, read the linked
   checkout must remain safe.
 - Do not commit, tag, publish releases, or push unless the user explicitly asks.
 - For releases, the browser auto-flash firmware must come from the latest
-  published GitHub release asset, not from an arbitrary local build.
+  published GitHub release asset, not from an arbitrary local build. Auto
+  Flash must default to X4 and reject X4 Pro regardless of stale metadata.
 
 ## Quick Commands
 

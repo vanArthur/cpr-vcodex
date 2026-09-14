@@ -8,6 +8,7 @@
 #include <Utf8.h>
 #include <XmlParserUtils.h>
 #include <expat.h>
+#include <strings.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -229,24 +230,25 @@ bool startsHrefAttribute(const std::string& text, const size_t pos) {
   return true;
 }
 
-void ChapterHtmlSlimParser::applyVerticalAlignToEntry(StyleStackEntry& entry, const CssStyle& style) {
-  if (!style.hasVerticalAlign()) return;
-  if (style.verticalAlign == CssVerticalAlign::Super) {
+void ChapterHtmlSlimParser::applyDirectionToEntry(StyleStackEntry& entry, const CssStyle& css) {
+  if (css.hasDirection()) {
+    entry.hasDirection = true;
+    entry.direction = css.direction;
+  }
+}
+
+void ChapterHtmlSlimParser::applyVerticalAlignToEntry(StyleStackEntry& entry, const CssStyle& css) {
+  if (!css.hasVerticalAlign()) return;
+  if (css.verticalAlign == CssVerticalAlign::Super) {
     entry.hasSup = true;
     entry.sup = true;
-  } else if (style.verticalAlign == CssVerticalAlign::Sub) {
+  } else if (css.verticalAlign == CssVerticalAlign::Sub) {
     entry.hasSub = true;
     entry.sub = true;
   }
 }
 
-void ChapterHtmlSlimParser::applySmallCapsToEntry(StyleStackEntry& entry, const CssStyle& style) {
-  if (!style.hasFontVariantCaps()) return;
-  entry.hasSmallCaps = true;
-  entry.smallCaps = style.fontVariantCaps == CssFontVariantCaps::SmallCaps;
-}
-
-// Update effective bold/italic/underline based on block style and inline style stack
+// Update effective bold/italic/underline/direction based on block style and inline style stack
 void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
   // Start with block-level styles
   effectiveBold = currentCssStyle.hasFontWeight() && currentCssStyle.fontWeight == CssFontWeight::Bold;
@@ -255,10 +257,17 @@ void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
                        hasTextDecoration(currentCssStyle.textDecoration, CssTextDecoration::Underline);
   effectiveStrikeThrough = currentCssStyle.hasTextDecoration() &&
                            hasTextDecoration(currentCssStyle.textDecoration, CssTextDecoration::LineThrough);
+  bool paragraphDirectionDefined = false;
+  bool paragraphIsRtl = false;
+  if (!blockStyleStack.empty()) {
+    const auto& blockStyle = blockStyleStack.back();
+    paragraphDirectionDefined = blockStyle.directionDefined;
+    paragraphIsRtl = blockStyle.isRtl;
+  }
+  effectiveDirectionDefined = paragraphDirectionDefined;
+  effectiveDirection = paragraphIsRtl ? CssTextDirection::Rtl : CssTextDirection::Ltr;
   effectiveSup = false;
   effectiveSub = false;
-  effectiveSmallCaps =
-      currentCssStyle.hasFontVariantCaps() && currentCssStyle.fontVariantCaps == CssFontVariantCaps::SmallCaps;
 
   // Apply inline style stack in order
   for (const auto& entry : inlineStyleStack) {
@@ -274,6 +283,14 @@ void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
     if (entry.hasStrikeThrough) {
       effectiveStrikeThrough = entry.strikeThrough;
     }
+    if (entry.hasDirection) {
+      effectiveDirectionDefined = true;
+      effectiveDirection = entry.direction;
+      if (entry.setsParagraphDirection) {
+        paragraphDirectionDefined = true;
+        paragraphIsRtl = entry.direction == CssTextDirection::Rtl;
+      }
+    }
     if (entry.hasSup) {
       effectiveSup = entry.sup;
       if (entry.sup) effectiveSub = false;
@@ -282,9 +299,14 @@ void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
       effectiveSub = entry.sub;
       if (entry.sub) effectiveSup = false;
     }
-    if (entry.hasSmallCaps) {
-      effectiveSmallCaps = entry.smallCaps;
-    }
+  }
+
+  // Keep flow direction in the active empty text block. Inline direction remains
+  // available for CSS inheritance without replacing the paragraph's base direction.
+  if (currentTextBlock && currentTextBlock->isEmpty()) {
+    auto& style = currentTextBlock->getBlockStyle();
+    style.directionDefined = paragraphDirectionDefined;
+    style.isRtl = paragraphIsRtl;
   }
 }
 
@@ -353,7 +375,7 @@ bool ChapterHtmlSlimParser::readImageDimensions(const std::string& resolvedPath,
   // prefix probe cannot recognize. Fall back to the older streaming extraction
   // path only for those images; the extracted file also becomes the lazy cache.
   if (!dimensionsRead) {
-    FsFile cachedImageFile;
+    HalFile cachedImageFile;
     bool extracted = false;
     if (Storage.openFileForWrite("EHP", cachedImagePath, cachedImageFile)) {
       extracted = epub->readItemContentsToStream(resolvedPath, cachedImageFile, IMAGE_DIMENSION_PREFIX_CHUNK);
@@ -410,7 +432,7 @@ void ChapterHtmlSlimParser::serviceLongParse(const char* stage) {
 void ChapterHtmlSlimParser::collectReferencedAnchors() {
   referencedAnchors.clear();
 
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForRead("EHP", filepath, file)) {
     return;
   }
@@ -433,12 +455,8 @@ void ChapterHtmlSlimParser::collectReferencedAnchors() {
     }
 
     serviceLongParse("anchor scan");
-    const int readResult = file.read(buffer, PARSE_BUFFER_SIZE);
-    if (readResult <= 0) {
-      if (readResult < 0) LOG_ERR("EHP", "File read error during anchor scan");
-      break;
-    }
-    const size_t len = static_cast<size_t>(readResult);
+    const size_t len = file.read(buffer, PARSE_BUFFER_SIZE);
+    if (len == 0) break;
 
     std::string chunk = carry;
     chunk.append(buffer, len);
@@ -520,13 +538,17 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   } else if (effectiveSub) {
     fontStyle = static_cast<EpdFontFamily::Style>(fontStyle | EpdFontFamily::SUB);
   }
-  if (effectiveSmallCaps) {
-    fontStyle = static_cast<EpdFontFamily::Style>(fontStyle | EpdFontFamily::SMALL_CAPS);
-  }
 
   // flush the buffer
   partWordBuffer[partWordBufferIndex] = '\0';
-  currentTextBlock->addWord(partWordBuffer, fontStyle, false, nextWordContinues, partWordVisibleOffset);
+  uint8_t linkId = 0;
+  if (insideFootnoteLink) {
+    if (!currentTextBlock->linkTargetMatches(currentFootnoteLinkId, currentFootnote.href)) {
+      currentFootnoteLinkId = currentTextBlock->addLinkTarget(currentFootnote.href);
+    }
+    linkId = currentFootnoteLinkId;
+  }
+  currentTextBlock->addWord(partWordBuffer, fontStyle, false, nextWordContinues, partWordVisibleOffset, linkId);
   partWordBufferIndex = 0;
   nextWordContinues = false;
   listItemBulletOnly = false;
@@ -612,7 +634,7 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
     return;
   }
   currentTextBlock.reset(new (std::nothrow) ParsedText(extraParagraphSpacing, forceParagraphIndents, hyphenationEnabled,
-                                                       focusReadingEnabled, wordSpacing, blockStyle));
+                                                       focusReadingEnabled, blockStyle));
   if (!currentTextBlock) {
     const auto heap = MemoryBudget::snapshot();
     LOG_ERR("EHP", "Failed to create text block (%u free, %u max alloc)", heap.freeHeap, heap.maxAllocHeap);
@@ -1094,14 +1116,6 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     return;
   }
 
-  // Kindle exports can include an obsolete low-resolution fallback beside the
-  // normal image. Skip only the explicit marker, including images inside tables.
-  if (matches(name, IMAGE_TAGS, std::size(IMAGE_TAGS)) && getAttribute(atts, "data-AmznRemoved-M8")) {
-    self->skipUntilDepth = self->depth;
-    self->depth += 1;
-    return;
-  }
-
   if (strcmp(name, "body") == 0 && self->xpathBodyDepth < 0) {
     self->xpathBodyDepth = self->depth;
   }
@@ -1125,12 +1139,15 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
   // Extract class, style, and id attributes
   std::string classAttr;
   std::string styleAttr;
+  std::string dirAttr;
   if (atts != nullptr) {
     for (int i = 0; atts[i]; i += 2) {
       if (strcmp(atts[i], "class") == 0) {
         classAttr = atts[i + 1];
       } else if (strcmp(atts[i], "style") == 0) {
         styleAttr = atts[i + 1];
+      } else if (strcmp(atts[i], "dir") == 0) {
+        dirAttr = atts[i + 1];
       } else if (strcmp(atts[i], "id") == 0) {
         const std::string idValue = atts[i + 1];
         if (self->shouldRecordAnchor(name, idValue)) {
@@ -1162,11 +1179,22 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     }
   }
 
-  // font-variant-caps is inherited. Preserve an explicit `normal` so nested
-  // content can opt out of a small-caps ancestor.
-  if (!cssStyle.hasFontVariantCaps() && self->effectiveSmallCaps) {
-    cssStyle.fontVariantCaps = CssFontVariantCaps::SmallCaps;
-    cssStyle.defined.fontVariantCaps = 1;
+  // HTML dir attribute overrides CSS direction (case-insensitive per HTML spec)
+  if (!dirAttr.empty()) {
+    if (strcasecmp(dirAttr.c_str(), "rtl") == 0) {
+      cssStyle.direction = CssTextDirection::Rtl;
+      cssStyle.defined.direction = 1;
+    } else if (strcasecmp(dirAttr.c_str(), "ltr") == 0) {
+      cssStyle.direction = CssTextDirection::Ltr;
+      cssStyle.defined.direction = 1;
+    }
+  }
+
+  // Direction is inherited in HTML/CSS. If this element does not define one, carry
+  // the currently active inherited direction into its computed style.
+  if (!cssStyle.hasDirection() && self->effectiveDirectionDefined) {
+    cssStyle.direction = self->effectiveDirection;
+    cssStyle.defined.direction = 1;
   }
 
   // Skip elements with display:none before all fast paths (tables, links, etc.).
@@ -1177,7 +1205,12 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
   }
 
   if (strcmp(name, "ruby") == 0) {
-    self->flushPartWordBuffer();
+    // <ruby> is an inline element: a base that follows text with no whitespace between them
+    // continues the same visual word, exactly like <b>/<i> handling in endElement().
+    if (self->partWordBufferIndex > 0) {
+      self->flushPartWordBuffer();
+      self->nextWordContinues = true;
+    }
     self->inRuby = true;
     self->rubyStartWordIndex = self->currentTextBlock ? static_cast<int>(self->currentTextBlock->size()) : 0;
     if (self->currentTextBlock) self->currentTextBlock->ensureRubyCapacity();
@@ -1234,17 +1267,22 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
 
     auto tableCellBlockStyle = BlockStyle();
     tableCellBlockStyle.textAlignDefined = true;
-    tableCellBlockStyle.alignment = cssStyle.hasTextAlign() ? cssStyle.textAlign : CssTextAlign::Left;
+    tableCellBlockStyle.alignment =
+        cssStyle.hasTextAlign()
+            ? cssStyle.textAlign
+            : (cssStyle.hasDirection() && cssStyle.direction == CssTextDirection::Rtl ? CssTextAlign::Right
+                                                                                      : CssTextAlign::Left);
+    if (cssStyle.hasDirection()) {
+      tableCellBlockStyle.directionDefined = true;
+      tableCellBlockStyle.isRtl = cssStyle.direction == CssTextDirection::Rtl;
+    }
     self->currentTableCellIsHeader = strcmp(name, "th") == 0;
-    {
-      StyleStackEntry cellStyle;
-      cellStyle.depth = self->depth;
-      if (self->currentTableCellIsHeader) {
-        cellStyle.hasBold = true;
-        cellStyle.bold = true;
-      }
-      applySmallCapsToEntry(cellStyle, cssStyle);
-      self->inlineStyleStack.push_back(cellStyle);
+    if (self->currentTableCellIsHeader) {
+      StyleStackEntry headerStyle;
+      headerStyle.depth = self->depth;
+      headerStyle.hasBold = true;
+      headerStyle.bold = true;
+      self->inlineStyleStack.push_back(headerStyle);
       self->updateEffectiveInlineStyle();
     }
     self->startNewTextBlock(tableCellBlockStyle);
@@ -1510,8 +1548,8 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 self->currentPageNextY += imageMarginTop;
 
                 // Create ImageBlock and add to page
-                auto imageBlock = std::shared_ptr<ImageBlock>(new (std::nothrow) ImageBlock(
-                    cachedImagePath, displayWidth, displayHeight, self->epub->getPath(), resolvedPath));
+                auto imageBlock = std::shared_ptr<ImageBlock>(
+                    new (std::nothrow) ImageBlock(cachedImagePath, resolvedPath, displayWidth, displayHeight));
                 if (!imageBlock) {
                   const auto heap = MemoryBudget::snapshot();
                   LOG_ERR("EHP", "Failed to create ImageBlock (%u free, %u max alloc)", heap.freeHeap,
@@ -1626,6 +1664,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       self->currentFootnote.href[sizeof(self->currentFootnote.href) - 1] = '\0';
       self->currentFootnote.number[0] = '\0';
       self->currentFootnoteLinkTextLen = 0;
+      // Register the target so laid-out words carry a link id (tap-to-follow links).
+      self->currentFootnoteLinkId =
+          self->currentTextBlock ? self->currentTextBlock->addLinkTarget(self->currentFootnote.href) : 0;
 
       // Apply underline style to visually indicate the link
       self->underlineUntilDepth = std::min(self->underlineUntilDepth, self->depth);
@@ -1633,8 +1674,8 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       entry.depth = self->depth;
       entry.hasUnderline = true;
       entry.underline = true;
+      applyDirectionToEntry(entry, cssStyle);
       applyVerticalAlignToEntry(entry, cssStyle);
-      applySmallCapsToEntry(entry, cssStyle);
       self->inlineStyleStack.push_back(entry);
       self->updateEffectiveInlineStyle();
 
@@ -1740,7 +1781,6 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       entry.hasStrikeThrough = true;
       entry.strikeThrough = hasTextDecoration(cssStyle.textDecoration, CssTextDecoration::LineThrough);
     }
-    applySmallCapsToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (matches(name, STRIKE_TAGS, std::size(STRIKE_TAGS))) {
@@ -1767,7 +1807,6 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       entry.hasUnderline = true;
       entry.underline = hasTextDecoration(cssStyle.textDecoration, CssTextDecoration::Underline);
     }
-    applySmallCapsToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (matches(name, BOLD_TAGS, std::size(BOLD_TAGS))) {
@@ -1792,7 +1831,6 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       entry.hasStrikeThrough = true;
       entry.strikeThrough = hasTextDecoration(cssStyle.textDecoration, CssTextDecoration::LineThrough);
     }
-    applySmallCapsToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (matches(name, ITALIC_TAGS, std::size(ITALIC_TAGS))) {
@@ -1817,7 +1855,6 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       entry.hasStrikeThrough = true;
       entry.strikeThrough = hasTextDecoration(cssStyle.textDecoration, CssTextDecoration::LineThrough);
     }
-    applySmallCapsToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (strcmp(name, "sup") == 0 || strcmp(name, "sub") == 0) {
@@ -1834,13 +1871,12 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       entry.hasSub = true;
       entry.sub = true;
     }
-    applySmallCapsToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (strcmp(name, "span") == 0 || !isHeaderOrBlock(name)) {
     // Handle span and other inline elements for CSS styling
     if (cssStyle.hasFontWeight() || cssStyle.hasFontStyle() || cssStyle.hasTextDecoration() ||
-        cssStyle.hasVerticalAlign() || cssStyle.hasFontVariantCaps()) {
+        cssStyle.hasDirection() || cssStyle.hasVerticalAlign()) {
       // Flush buffer before style change so preceding text gets current style
       if (self->partWordBufferIndex > 0) {
         self->flushPartWordBuffer();
@@ -1862,8 +1898,17 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         entry.hasStrikeThrough = true;
         entry.strikeThrough = hasTextDecoration(cssStyle.textDecoration, CssTextDecoration::LineThrough);
       }
-      applyVerticalAlignToEntry(entry, cssStyle);
-      applySmallCapsToEntry(entry, cssStyle);
+      applyDirectionToEntry(entry, cssStyle);
+      entry.setsParagraphDirection = strcmp(name, "html") == 0 || strcmp(name, "body") == 0;
+      if (cssStyle.hasVerticalAlign()) {
+        if (cssStyle.verticalAlign == CssVerticalAlign::Super) {
+          entry.hasSup = true;
+          entry.sup = true;
+        } else if (cssStyle.verticalAlign == CssVerticalAlign::Sub) {
+          entry.hasSub = true;
+          entry.sub = true;
+        }
+      }
       self->inlineStyleStack.push_back(entry);
       self->updateEffectiveInlineStyle();
     }
@@ -2188,6 +2233,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
       self->pendingFootnotes.push_back({wordIndex, entry});
     }
     self->insideFootnoteLink = false;
+    self->currentFootnoteLinkId = 0;
   }
 
   // Leaving skip
@@ -2261,7 +2307,9 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
       self->blockStyleStack.pop_back();
       // Subsequent bare text must inherit the parent, not the style of the
       // block that just closed (alignment, margins, and padding included).
-      self->startNewTextBlock(self->blockStyleStack.back());
+      // Vertical margins and paddings are stripped.
+      self->startNewTextBlock(self->blockStyleStack.back().withoutTop().withoutBottom());
+      self->updateEffectiveInlineStyle();
     }
 
     // </li> closes: if the bullet never got inline text (empty <li> or <li> with only
@@ -2274,9 +2322,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
   if (VisibleTextUtils::equalsTag(name, "body")) {
     self->insideBody = false;
   }
-  // Only a closed document root qualifies; an inner <html> must not hide a
-  // later XML error or an allocation failure while finishing the chapter.
-  if (self->depth == 0 && strcmp(name, "html") == 0 && !self->lowMemoryAbort) {
+  if (VisibleTextUtils::equalsTag(name, "html")) {
     self->htmlEnded_ = true;
   }
 }
@@ -2285,9 +2331,9 @@ ChapterHtmlSlimParser::~ChapterHtmlSlimParser() { abortParse(); }
 
 bool ChapterHtmlSlimParser::beginParse() {
   abortParse();
+  htmlEnded_ = false;
   lastLongParseServiceMs = 0;
   lowMemoryAbort = false;
-  htmlEnded_ = false;
   attemptedTextLayoutFontCacheRelease = false;
   loggedSoftLowMemoryContinuation = false;
 
@@ -2372,17 +2418,17 @@ ChapterHtmlSlimParser::ParseStatus ChapterHtmlSlimParser::parseStep() {
     return ParseStatus::Error;
   }
 
-  const int readResult = parseFile_.read(buf, PARSE_BUFFER_SIZE);
-  if (readResult < 0 || (readResult == 0 && parseFile_.available() > 0)) {
+  const size_t len = parseFile_.read(buf, PARSE_BUFFER_SIZE);
+
+  if (len == 0 && parseFile_.available() > 0) {
     LOG_ERR("EHP", "File read error");
     return ParseStatus::Error;
   }
-  const size_t len = static_cast<size_t>(readResult);
 
   const bool done = parseFile_.available() == 0;
 
   if (XML_ParseBuffer(xmlParser_, static_cast<int>(len), done) == XML_STATUS_ERROR) {
-    if (htmlEnded_ && !lowMemoryAbort && XML_GetErrorCode(xmlParser_) != XML_ERROR_NO_MEMORY) {
+    if (htmlEnded_) {
       LOG_DBG("EHP", "Ignoring trailing data after </html>: %s", XML_ErrorString(XML_GetErrorCode(xmlParser_)));
       return ParseStatus::Done;
     }
@@ -2500,6 +2546,16 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     LOG_ERR("EHP", "Failed to create PageLine (%u free, %u max alloc)", heap.freeHeap, heap.maxAllocHeap);
     lowMemoryAbort = true;
     return;
+  }
+  // Internal-link rectangles for touch navigation (layout-only metadata moved onto the page).
+  const int rubyShift = line->getRubyShift(renderer.getFontAscenderSize(fontId));
+  const int baseLineHeight = renderer.getLineHeight(fontId, lineCompression);
+  for (const auto& link : line->takeLinkSpans()) {
+    if (!currentPage->addLink(link.href, static_cast<int16_t>(xOffset + link.x),
+                              static_cast<int16_t>(currentPageNextY + rubyShift - link.topLift), link.width,
+                              static_cast<int16_t>(baseLineHeight + link.topLift))) {
+      LOG_DBG("EHP", "Dropped page link: %.48s", link.href);
+    }
   }
   currentPage->elements.push_back(pageLine);
   currentPageNextY += lineHeight;

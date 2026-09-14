@@ -12,10 +12,6 @@ README_PATH = "README.md"
 BUILD_VERSION_JSON_PATH = "artifacts/build-version.json"
 RELEASE_COUNTER_FILE_TEMPLATE = ".release-counter-{base}.txt"
 RELEASE_DRY_RUN_ENV = "VCODEX_RELEASE_DRY_RUN"
-RELEASE_ASSET_SUFFIX_BY_ENV = {
-    "gh_release": "",
-    "x4pro-gh_release": "-x4pro",
-}
 
 
 def load_build_metadata(project_dir: Path) -> tuple[str, str, int | None]:
@@ -113,8 +109,15 @@ def package_vcodex_bin(source, target, env):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pio_env = env.subst("$PIOENV")
-    release_asset_suffix = RELEASE_ASSET_SUFFIX_BY_ENV.get(pio_env, "")
-    artifact_name = f"{safe_version}-cpr-vcodex{release_asset_suffix}.bin"
+    # Board suffix for internal ESP32-S3 X4 Pro builds. Public distribution is
+    # withdrawn; keeping distinct local names prevents C3/X4 Pro confusion in
+    # maintainer diagnostics. Dev versions already carry the suffix.
+    board_suffix = ""
+    if pio_env.startswith("x4pro") and not safe_version.endswith("-x4pro"):
+        board_suffix = "-x4pro"
+    artifact_stem = f"{safe_version}-cpr-vcodex{board_suffix}"
+
+    artifact_name = f"{artifact_stem}.bin"
     artifact_path = output_dir / artifact_name
     shutil.copy2(firmware_path, artifact_path)
 
@@ -126,13 +129,15 @@ def package_vcodex_bin(source, target, env):
         "firmwareBytes": artifact_path.stat().st_size,
         "sourceBin": str(firmware_path),
         "environment": pio_env,
-        "releaseAssetSuffix": release_asset_suffix,
+        "board": "x4pro" if pio_env.startswith("x4pro") else "x4",
     }
     if build_seq is not None:
         metadata["buildSequence"] = build_seq
-    metadata_path = output_dir / f"{safe_version}-cpr-vcodex{release_asset_suffix}.json"
+    metadata_path = output_dir / f"{artifact_stem}.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
+    # Only the C3 release env owns the release counter and the README row; the
+    # x4pro release env is built from the same tag and must not advance them.
     if pio_env == "gh_release" and os.environ.get(RELEASE_DRY_RUN_ENV) == "1":
         print(f"Release metadata update skipped: {RELEASE_DRY_RUN_ENV}=1")
     elif pio_env == "gh_release":

@@ -60,7 +60,6 @@ bool KOReaderCredentialStore::saveToFile() const {
 }
 
 bool KOReaderCredentialStore::loadFromFile() {
-  JsonSettingsIO::recoverFile(KOREADER_PROFILES_FILE_JSON);
   const std::string tempPath = std::string(KOREADER_PROFILES_FILE_JSON) + ".tmp";
   if (!Storage.exists(KOREADER_PROFILES_FILE_JSON) && Storage.exists(tempPath.c_str())) {
     if (Storage.rename(tempPath.c_str(), KOREADER_PROFILES_FILE_JSON)) {
@@ -120,7 +119,7 @@ bool KOReaderCredentialStore::loadFromFile() {
 }
 
 bool KOReaderCredentialStore::loadFromBinaryFile() {
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForRead("KRS", KOREADER_FILE_BIN, file)) {
     return false;
   }
@@ -237,6 +236,13 @@ const std::string& KOReaderCredentialStore::getServerUrl() const {
 }
 
 std::string KOReaderCredentialStore::getBaseUrl() const { return resolveBaseUrl(getServerUrl()); }
+
+bool KOReaderCredentialStore::usesCrossPointSyncServer() const {
+  // Upstream's crosspoint-sync server (sync.crosspointreader.com) accepts a CrossPoint-
+  // specific `position` extension; third-party KOSync servers must never receive it.
+  static constexpr char CROSSPOINT_SYNC_SERVER_URL[] = "https://sync.crosspointreader.com";
+  return getBaseUrl() == CROSSPOINT_SYNC_SERVER_URL;
+}
 
 std::string KOReaderCredentialStore::resolveBaseUrl(const std::string& serverUrl) {
   std::string url;

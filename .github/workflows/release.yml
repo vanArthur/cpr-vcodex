@@ -1,4 +1,9 @@
 name: Compile Release
+
+# Publishes only the ESP32-C3 firmware shared by X4/X3. X4 Pro distribution is
+# withdrawn pending hardware validation and a recovery path for USB-locked
+# devices; release tags must not create `-x4pro` assets.
+
 on:
   push:
     tags:
@@ -13,15 +18,17 @@ permissions:
 
 jobs:
   build-release:
+    name: Build ${{ matrix.pio_env }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - pio_env: gh_release
-            asset_suffix: ''
-          - pio_env: x4pro-gh_release
-            asset_suffix: '-x4pro'
+            suffix: ""
+    env:
+      PIO_ENV: ${{ matrix.pio_env }}
+      ASSET_SUFFIX: ${{ matrix.suffix }}
     steps:
       - name: Checkout repository
         run: |
@@ -32,12 +39,34 @@ jobs:
           git checkout --force FETCH_HEAD
           git submodule update --init --recursive
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: false
+
       - name: Install PlatformIO Core
         run: |
           set -euo pipefail
-          python3 -m pip install --user -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip || \
-            python3 -m pip install --user --break-system-packages -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          # platform-espressif32's builder/main.py imports these unconditionally; its own
+          # penv bootstrap (builder/penv_setup.py) is supposed to install them automatically
+          # but isn't picking them up reliably in this runner image, so pin them explicitly.
+          uv pip install --system -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
+            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
+            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
+            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
 
       - name: Build CPR-vCodex release
         env:
@@ -45,23 +74,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          pio run -e "${{ matrix.pio_env }}" | tee "artifacts/${GITHUB_REF_NAME}${{ matrix.asset_suffix }}-build.log"
+          pio run -e "${PIO_ENV}" -j1 | tee "artifacts/${GITHUB_REF_NAME}${ASSET_SUFFIX}-build.log"
 
       - name: Report firmware budget
-        if: matrix.pio_env == 'gh_release'
         run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}${ASSET_SUFFIX}"
           python3 scripts/firmware_budget_report.py \
-            --tag "${GITHUB_REF_NAME}" \
-            --build-log "artifacts/${GITHUB_REF_NAME}-build.log" \
+            --tag "${tag}" \
+            --build-log "artifacts/${tag}-build.log" \
+            --metadata "artifacts/${tag}.json" \
+            --out-json "artifacts/${tag}-firmware-budget.json" \
+            --out-md "artifacts/${tag}-firmware-budget.md" \
             --fail-over-budget
 
       - name: Validate packaged release artifact
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          suffix="${{ matrix.asset_suffix }}"
-          artifact="artifacts/${tag}${suffix}.bin"
-          metadata="artifacts/${tag}${suffix}.json"
+          tag="${GITHUB_REF_NAME}${ASSET_SUFFIX}"
+          artifact="artifacts/${tag}.bin"
+          metadata="artifacts/${tag}.json"
 
           test -f "${artifact}" || {
             echo "Expected packaged firmware ${artifact} was not created."
@@ -79,86 +111,52 @@ jobs:
           import os
           from pathlib import Path
 
-          tag = os.environ["GITHUB_REF_NAME"]
-          suffix = os.environ["ASSET_SUFFIX"]
-          metadata = json.loads(Path(f"artifacts/{tag}{suffix}.json").read_text(encoding="utf-8"))
-          if metadata.get("artifactName") != f"{tag}{suffix}.bin":
-              raise SystemExit(f"metadata artifactName mismatch: {metadata.get('artifactName')} != {tag}{suffix}.bin")
-          if metadata.get("releaseAssetSuffix") != suffix:
-              raise SystemExit(f"metadata suffix mismatch: {metadata.get('releaseAssetSuffix')} != {suffix}")
-          if metadata.get("environment") != os.environ["PIO_ENV"]:
-              raise SystemExit(f"unexpected release environment: {metadata.get('environment')}")
+          tag = os.environ["GITHUB_REF_NAME"] + os.environ.get("ASSET_SUFFIX", "")
+          expected_env = os.environ["PIO_ENV"]
+          metadata = json.loads(Path(f"artifacts/{tag}.json").read_text(encoding="utf-8"))
+          if metadata.get("artifactName") != f"{tag}.bin":
+              raise SystemExit(f"metadata artifactName mismatch: {metadata.get('artifactName')} != {tag}.bin")
+          if metadata.get("environment") != expected_env:
+              raise SystemExit(f"unexpected release environment: {metadata.get('environment')} != {expected_env}")
           print(f"Validated {metadata['artifactName']} ({metadata['firmwareBytes']} bytes)")
           PY
-        env:
-          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
-          PIO_ENV: ${{ matrix.pio_env }}
-
-      - name: Upload packaged firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.pio_env }}
-          path: |
-            artifacts/${{ github.ref_name }}${{ matrix.asset_suffix }}.bin
-            artifacts/${{ github.ref_name }}${{ matrix.asset_suffix }}.json
-            artifacts/${{ github.ref_name }}${{ matrix.asset_suffix }}-build.log
-            artifacts/${{ github.ref_name }}-firmware-budget.json
-            artifacts/${{ github.ref_name }}-firmware-budget.md
-          if-no-files-found: ignore
-
-  publish-release:
-    runs-on: ubuntu-latest
-    needs: build-release
-    steps:
-      - name: Checkout repository
-        run: |
-          set -euo pipefail
-          git init .
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 origin "${GITHUB_REF}"
-          git checkout --force FETCH_HEAD
-
-      - name: Download packaged firmware
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
 
       - name: Publish GitHub Release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          release_tag="${GITHUB_REF_NAME}"
+          tag="${GITHUB_REF_NAME}${ASSET_SUFFIX}"
           artifact="artifacts/${tag}.bin"
-          x4pro_artifact="artifacts/${tag}-x4pro.bin"
           metadata="artifacts/${tag}.json"
-          x4pro_metadata="artifacts/${tag}-x4pro.json"
           budget_json="artifacts/${tag}-firmware-budget.json"
           budget_md="artifacts/${tag}-firmware-budget.md"
           notes_file="$(mktemp)"
 
-          python3 scripts/release_notes_from_changelog.py --tag "${tag}" > "${notes_file}"
+          python3 scripts/release_notes_from_changelog.py --tag "${release_tag}" > "${notes_file}"
 
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" \
+          upload_assets() {
+            gh release upload "${release_tag}" \
               "${artifact}#${tag}.bin" \
-              "${x4pro_artifact}#${tag}-x4pro.bin" \
               "${metadata}#${tag}.json" \
-              "${x4pro_metadata}#${tag}-x4pro.json" \
               "${budget_json}#${tag}-firmware-budget.json" \
               "${budget_md}#${tag}-firmware-budget.md" \
               --clobber
-            gh release edit "${tag}" --title "${tag}" --notes-file "${notes_file}"
+          }
+
+          if gh release view "${release_tag}" >/dev/null 2>&1; then
+            upload_assets
+            if [ -z "${ASSET_SUFFIX}" ]; then
+              gh release edit "${release_tag}" --title "${release_tag}" --notes-file "${notes_file}"
+            fi
           else
-            gh release create "${tag}" \
+            gh release create "${release_tag}" \
               "${artifact}#${tag}.bin" \
-              "${x4pro_artifact}#${tag}-x4pro.bin" \
               "${metadata}#${tag}.json" \
-              "${x4pro_metadata}#${tag}-x4pro.json" \
               "${budget_json}#${tag}-firmware-budget.json" \
               "${budget_md}#${tag}-firmware-budget.md" \
               --verify-tag \
-              --title "${tag}" \
-              --notes-file "${notes_file}"
+              --title "${release_tag}" \
+              --notes-file "${notes_file}" || upload_assets
           fi

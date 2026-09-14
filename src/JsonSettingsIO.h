@@ -1,7 +1,6 @@
 #pragma once
 
 class CrossPointSettings;
-struct ReaderPreferences;
 class CrossPointState;
 class WifiCredentialStore;
 class KOReaderCredentialStore;
@@ -14,14 +13,9 @@ class OpdsServerStore;
 
 namespace JsonSettingsIO {
 
-// Recover a committed transaction backup before considering legacy temp files.
-bool recoverFile(const char* path);
-
 // CrossPointSettings
 bool saveSettings(const CrossPointSettings& s, const char* path);
 bool loadSettings(CrossPointSettings& s, const char* json, bool* needsResave = nullptr);
-bool saveBookReaderSettings(const ReaderPreferences& settings, bool enabled, const char* path);
-bool loadBookReaderSettings(ReaderPreferences& settings, bool& enabled, const char* path);
 
 // CrossPointState
 bool saveState(const CrossPointState& s, const char* path);
@@ -56,7 +50,5 @@ bool loadAchievements(AchievementsStore& store, const char* json);
 bool loadAchievementsFromFile(AchievementsStore& store, const char* path);
 
 // OpdsServerStore
-bool saveOpds(const OpdsServerStore& store, const char* path);
-bool loadOpds(OpdsServerStore& store, const char* json, bool* needsResave = nullptr);
 
 }  // namespace JsonSettingsIO

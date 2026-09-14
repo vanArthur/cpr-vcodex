@@ -40,7 +40,7 @@ class ZipFile {
 
  private:
   const std::string& filePath;
-  FsFile file;
+  HalFile file;
   ZipDetails zipDetails = {0, 0, false};
   std::unordered_map<std::string, FileStatSlim> fileStatSlimCache;
 
@@ -51,7 +51,6 @@ class ZipFile {
   bool loadFileStatSlim(const char* filename, FileStatSlim* fileStat);
   long getDataOffset(const FileStatSlim& fileStat);
   bool loadZipDetails();
-  bool readExact(void* buffer, size_t length);
 
  public:
   explicit ZipFile(const std::string& filePath) : filePath(filePath) {}
@@ -70,8 +69,10 @@ class ZipFile {
   // Due to the memory required to run each of these, it is recommended to not preopen the zip file for multiple
   // These functions will open and close the zip as needed
   uint8_t* readFileToMemory(const char* filename, size_t* size = nullptr, bool trailingNullByte = false);
+  // allowEarlyStop: a short write from `out` is treated as the sink asking to
+  // stop (returns true) instead of a write failure — used by header probes
+  // that only need the first bytes of an entry.
   bool readFileToStream(const char* filename, Print& out, size_t chunkSize, bool allowEarlyStop = false);
-  bool readFilePrefixToBuffer(const char* filename, uint8_t* out, size_t maxBytes, size_t* bytesRead, size_t chunkSize);
 
   template <typename F>
   bool enumerateFilePaths(F&& callback) {
@@ -82,6 +83,14 @@ class ZipFile {
       return true;
     }
 
+    return enumerateFileEntries([&callback](std::string_view path, uint32_t, uint32_t) { callback(path); });
+  }
+
+  // Callback receives (path, crc32, compressedSize) for each central-directory
+  // entry. Always scans the central directory: the slim-stat cache does not
+  // hold CRCs.
+  template <typename F>
+  bool enumerateFileEntries(F&& callback) {
     const bool wasOpen = isOpen();
     if (!wasOpen && !open()) {
       return false;
@@ -94,53 +103,42 @@ class ZipFile {
       return false;
     }
 
-    if (!file.seek(zipDetails.centralDirOffset)) {
-      if (!wasOpen) close();
-      return false;
-    }
+    file.seek(zipDetails.centralDirOffset);
 
     uint32_t sig;
     char itemName[256];
 
-    bool success = true;
     while (file.available()) {
-      if (!readExact(&sig, 4)) {
-        success = false;
-        break;
-      }
+      file.read(&sig, 4);
       if (sig != 0x02014b50) {
         break;
       }
 
+      file.seekCur(12);
+      uint32_t crc32, compressedSize;
+      file.read(&crc32, 4);
+      file.read(&compressedSize, 4);
+      file.seekCur(4);
       uint16_t nameLen, m, k;
-      if (!file.seekCur(24) || !readExact(&nameLen, 2) || !readExact(&m, 2) || !readExact(&k, 2) || !file.seekCur(12)) {
-        success = false;
-        break;
-      }
+      file.read(&nameLen, 2);
+      file.read(&m, 2);
+      file.read(&k, 2);
+      file.seekCur(12);
 
       if (nameLen < sizeof(itemName)) {
-        if (!readExact(itemName, nameLen)) {
-          success = false;
-          break;
-        }
+        file.read(itemName, nameLen);
         itemName[nameLen] = '\0';
-        callback(std::string_view{itemName, nameLen});
+        callback(std::string_view{itemName, nameLen}, crc32, compressedSize);
       } else {
-        if (!file.seekCur(nameLen)) {
-          success = false;
-          break;
-        }
+        file.seekCur(nameLen);
       }
 
-      if (!file.seekCur(m + k)) {
-        success = false;
-        break;
-      }
+      file.seekCur(m + k);
     }
 
     if (!wasOpen) {
       close();
     }
-    return success;
+    return true;
   }
 };

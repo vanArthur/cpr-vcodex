@@ -67,16 +67,8 @@ class XtcParser {
    * @return Error code
    */
   XtcError loadPageStreaming(uint32_t pageIndex,
-                             const std::function<void(const uint8_t* data, size_t size, size_t offset)>& callback,
+                             std::function<void(const uint8_t* data, size_t size, size_t offset)> callback,
                              size_t chunkSize = 1024);
-  using StreamCallback = void (*)(void* context, const uint8_t* data, size_t size, size_t offset);
-  XtcError loadPageStreaming(uint32_t pageIndex, StreamCallback callback, void* context, size_t chunkSize = 1024);
-
-  // Paired column-major planes: both bytes for a pixel group are available
-  // together without allocating a whole XTCH page or reading the framebuffer.
-  using PlanePairCallback = void (*)(void* context, const uint8_t* first, const uint8_t* second, size_t size,
-                                     size_t planeOffset);
-  XtcError loadPagePlanePairs(uint32_t pageIndex, PlanePairCallback callback, void* context);
 
   // Get title/author from metadata
   std::string getTitle() const { return m_title; }
@@ -92,7 +84,7 @@ class XtcParser {
   XtcError getLastError() const { return m_lastError; }
 
  private:
-  FsFile m_file;
+  HalFile m_file;
   std::string m_filepath;
   bool m_isOpen;
   XtcHeader m_header;
@@ -105,8 +97,6 @@ class XtcParser {
   bool m_hasChapters;
   bool m_chaptersLoaded;
   XtcError m_lastError;
-  static constexpr size_t STREAM_BUFFER_SIZE = 1024;
-  std::unique_ptr<uint8_t[]> m_streamBuffer;
 
   // Internal helper functions
   XtcError readHeader();
@@ -115,8 +105,6 @@ class XtcParser {
   XtcError readAuthor();
   XtcError readChapters();
   bool readPageTableEntry(uint32_t pageIndex, PageInfo& info);
-  XtcError preparePageRead(uint32_t pageIndex, PageInfo& info, size_t& bitmapSize);
-  bool ensureStreamBuffer();
 
   // File handle management — reopen on demand, close after use
   bool ensureFileOpen();

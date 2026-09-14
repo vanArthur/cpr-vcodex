@@ -3,10 +3,9 @@
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
-#include <esp_task_wdt.h>
 
-#include "WebPathUtils.h"
 #include "util/BookCacheUtils.h"
+#include "util/TaskWatchdog.h"
 
 namespace {
 constexpr const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
@@ -48,9 +47,6 @@ bool WebDAVHandler::canRaw(WebServer& server, const String& uri) {
 void WebDAVHandler::raw(WebServer& server, const String& uri, HTTPRaw& raw) {
   (void)uri;
   if (raw.status == RAW_START) {
-    _putTransaction.cancel(_putFile);
-    _putOk = false;
-    _putReceived = 0;
     _putPath = getRequestPath(server);
     if (isProtectedPath(_putPath)) {
       _putOk = false;
@@ -67,44 +63,60 @@ void WebDAVHandler::raw(WebServer& server, const String& uri, HTTPRaw& raw) {
       }
     }
 
-    _putOk = _putTransaction.begin(_putPath, _putFile);
+    if (_putFile) _putFile.close();
     _putExisted = Storage.exists(_putPath.c_str());
+
+    if (_putExisted) {
+      HalFile existing = Storage.open(_putPath.c_str());
+      if (existing && existing.isDirectory()) {
+        existing.close();
+        _putOk = false;
+        return;
+      }
+      if (existing) existing.close();
+    }
+
+    // Write to a temp file to avoid destroying the original on failed upload
+    String tempPath = _putPath + ".davtmp";
+    Storage.remove(tempPath.c_str());
+    _putOk = Storage.openFileForWrite("DAV", tempPath, _putFile);
     LOG_DBG("DAV", "PUT START: %s", _putPath.c_str());
 
   } else if (raw.status == RAW_WRITE) {
     if (_putFile && _putOk) {
-      esp_task_wdt_reset();
+      resetTaskWatchdogIfSubscribed();
       size_t written = _putFile.write(raw.buf, raw.currentSize);
-      _putReceived += written;
       if (written != raw.currentSize) {
         _putOk = false;
-        _putTransaction.cancel(_putFile);
       }
     }
 
   } else if (raw.status == RAW_END) {
+    if (_putFile) _putFile.close();
     if (_putOk) {
-      _putOk = _putReceived == raw.totalSize && _putTransaction.finish(_putFile, _putReceived);
+      String tempPath = _putPath + ".davtmp";
+      if (_putExisted) Storage.remove(_putPath.c_str());
+      HalFile tmp = Storage.open(tempPath.c_str());
+      if (tmp) {
+        _putOk = tmp.rename(_putPath.c_str());
+        tmp.close();
+      } else {
+        _putOk = false;
+      }
+      if (!_putOk) Storage.remove(tempPath.c_str());
     }
-    if (!_putOk) _putTransaction.cancel(_putFile);
     LOG_DBG("DAV", "PUT END: %u bytes, ok=%d", raw.totalSize, _putOk);
 
   } else if (raw.status == RAW_ABORTED) {
-    // A rejected START owns no temp file. Never remove a path constructed from
-    // that untrusted request during a subsequent ABORT callback.
-    _putTransaction.cancel(_putFile);
+    if (_putFile) _putFile.close();
+    String tempPath = _putPath + ".davtmp";
+    Storage.remove(tempPath.c_str());
     _putOk = false;
   }
 }
 
 bool WebDAVHandler::handle(WebServer& server, HTTPMethod method, const String& uri) {
   (void)uri;
-  // PROPFIND/LOCK must validate paths too; raw PUT is independently checked
-  // before any file is opened. OPTIONS does not access storage.
-  if (method != HTTP_OPTIONS && isProtectedPath(getRequestPath(server))) {
-    server.send(403, "text/plain", "Invalid or protected path");
-    return true;
-  }
   switch (method) {
     case HTTP_OPTIONS:
       handleOptions(server);
@@ -170,7 +182,7 @@ void WebDAVHandler::handlePropfind(WebServer& s) {
     return;
   }
 
-  FsFile root = Storage.open(path.c_str());
+  HalFile root = Storage.open(path.c_str());
   if (!root) {
     if (path == "/") {
       // Root should always work — send minimal response
@@ -209,7 +221,7 @@ void WebDAVHandler::handlePropfind(WebServer& s) {
 
   // If depth > 0 and it's a directory, list children
   if (depth > 0) {
-    FsFile file = root.openNextFile();
+    HalFile file = root.openNextFile();
     char name[500];
     while (file) {
       file.getName(name, sizeof(name));
@@ -240,7 +252,7 @@ void WebDAVHandler::handlePropfind(WebServer& s) {
 
       file.close();
       yield();
-      esp_task_wdt_reset();
+      resetTaskWatchdogIfSubscribed();
       file = root.openNextFile();
     }
   }
@@ -299,7 +311,7 @@ void WebDAVHandler::handleGet(WebServer& s) {
     return;
   }
 
-  FsFile file = Storage.open(path.c_str());
+  HalFile file = Storage.open(path.c_str());
   if (!file) {
     s.send(500, "text/plain", "Failed to open file");
     return;
@@ -336,7 +348,7 @@ void WebDAVHandler::handleHead(WebServer& s) {
     return;
   }
 
-  FsFile file = Storage.open(path.c_str());
+  HalFile file = Storage.open(path.c_str());
   if (!file) {
     s.send(500, "text/plain", "");
     return;
@@ -367,6 +379,8 @@ void WebDAVHandler::handlePut(WebServer& s) {
   }
 
   if (!_putOk) {
+    String tempPath = path + ".davtmp";
+    Storage.remove(tempPath.c_str());
     s.send(500, "text/plain", "Write failed - incomplete upload or disk full");
     return;
   }
@@ -397,7 +411,7 @@ void WebDAVHandler::handleDelete(WebServer& s) {
     return;
   }
 
-  FsFile file = Storage.open(path.c_str());
+  HalFile file = Storage.open(path.c_str());
   if (!file) {
     s.send(500, "text/plain", "Failed to open");
     return;
@@ -405,7 +419,7 @@ void WebDAVHandler::handleDelete(WebServer& s) {
 
   if (file.isDirectory()) {
     // Check if directory is empty
-    FsFile entry = file.openNextFile();
+    HalFile entry = file.openNextFile();
     if (entry) {
       entry.close();
       file.close();
@@ -523,7 +537,7 @@ void WebDAVHandler::handleMove(WebServer& s) {
     Storage.remove(dstPath.c_str());
   }
 
-  FsFile file = Storage.open(srcPath.c_str());
+  HalFile file = Storage.open(srcPath.c_str());
   if (!file) {
     s.send(500, "text/plain", "Failed to open source");
     return;
@@ -569,7 +583,7 @@ void WebDAVHandler::handleCopy(WebServer& s) {
     return;
   }
 
-  FsFile srcFile = Storage.open(srcPath.c_str());
+  HalFile srcFile = Storage.open(srcPath.c_str());
   if (!srcFile) {
     s.send(500, "text/plain", "Failed to open source");
     return;
@@ -603,7 +617,7 @@ void WebDAVHandler::handleCopy(WebServer& s) {
     Storage.remove(dstPath.c_str());
   }
 
-  FsFile dstFile;
+  HalFile dstFile;
   if (!Storage.openFileForWrite("DAV", dstPath, dstFile)) {
     srcFile.close();
     s.send(500, "text/plain", "Failed to create destination");
@@ -614,7 +628,7 @@ void WebDAVHandler::handleCopy(WebServer& s) {
   uint8_t buf[4096];
   bool copyOk = true;
   while (srcFile.available()) {
-    esp_task_wdt_reset();
+    resetTaskWatchdogIfSubscribed();
     int bytesRead = srcFile.read(buf, sizeof(buf));
     if (bytesRead <= 0) break;
     size_t written = dstFile.write(buf, bytesRead);
@@ -667,7 +681,24 @@ void WebDAVHandler::handleUnlock(WebServer& s) {
 
 // ── Utility functions ────────────────────────────────────────────────────────
 
-String WebDAVHandler::getRequestPath(WebServer& s) const { return WebPathUtils::normalize(s.uri(), true); }
+String WebDAVHandler::getRequestPath(WebServer& s) const {
+  String uri = s.uri();
+  String decoded = WebServer::urlDecode(uri);
+
+  // Normalize using FsHelpers
+  std::string normalized = FsHelpers::normalisePath(decoded.c_str());
+  String result = normalized.c_str();
+
+  if (result.isEmpty()) return "/";
+  if (!result.startsWith("/")) result = "/" + result;
+
+  // Remove trailing slash unless root
+  if (result.length() > 1 && result.endsWith("/")) {
+    result = result.substring(0, result.length() - 1);
+  }
+
+  return result;
+}
 
 String WebDAVHandler::getDestinationPath(WebServer& s) const {
   String dest = s.header("Destination");
@@ -685,7 +716,19 @@ String WebDAVHandler::getDestinationPath(WebServer& s) const {
     }
   }
 
-  return WebPathUtils::normalize(dest, true);
+  String decoded = WebServer::urlDecode(dest);
+  std::string normalized = FsHelpers::normalisePath(decoded.c_str());
+  String result = normalized.c_str();
+
+  if (result.isEmpty()) return "/";
+  if (!result.startsWith("/")) result = "/" + result;
+
+  // Remove trailing slash unless root
+  if (result.length() > 1 && result.endsWith("/")) {
+    result = result.substring(0, result.length() - 1);
+  }
+
+  return result;
 }
 
 void WebDAVHandler::urlEncodePath(const String& path, String& out) const {
@@ -715,7 +758,31 @@ void WebDAVHandler::urlEncodePath(const String& path, String& out) const {
   }
 }
 
-bool WebDAVHandler::isProtectedPath(const String& path) const { return WebPathUtils::isProtected(path); }
+bool WebDAVHandler::isProtectedPath(const String& path) const {
+  // Check every segment of the path, not just the last one.
+  // This prevents access to e.g. /.hidden/somefile or /System Volume Information/foo
+  int start = 0;
+  while (start < (int)path.length()) {
+    if (path.charAt(start) == '/') {
+      start++;
+      continue;
+    }
+    int end = path.indexOf('/', start);
+    if (end == -1) end = path.length();
+
+    String segment = path.substring(start, end);
+
+    if (segment.startsWith(".")) return true;
+
+    for (const auto* item : HIDDEN_ITEMS) {
+      if (segment.equals(item)) return true;
+    }
+
+    start = end + 1;
+  }
+
+  return false;
+}
 
 int WebDAVHandler::getDepth(WebServer& s) const {
   String depth = s.header("Depth");

@@ -6,16 +6,19 @@
 #include <Logging.h>
 #include <Serialization.h>
 
+#include <algorithm>
 #include <cstring>
+#include <iterator>
+#include <limits>
 #include <string>
 
+#include "ReaderFontSizes.h"
 #include "fontIds.h"
-#include "util/BookIdentity.h"
 
 // Initialize the static instance
 CrossPointSettings CrossPointSettings::instance;
 
-void readAndValidate(FsFile& file, uint8_t& member, const uint8_t maxValue) {
+void readAndValidate(HalFile& file, uint8_t& member, const uint8_t maxValue) {
   uint8_t tempValue;
   serialization::readPod(file, tempValue);
   if (tempValue < maxValue) {
@@ -44,6 +47,9 @@ uint8_t migrateLegacyUiTheme(const uint8_t legacyUiTheme) {
   }
 }
 
+// settings.bin stored the 0..3 SMALL..EXTRA_LARGE slot; the fork later inserted
+// X_SMALL at 0, so the stored slot shifts up by one before it is turned into a
+// point size.
 uint8_t migrateLegacyFontSize(const uint8_t legacyFontSize) {
   return legacyFontSize < LEGACY_FONT_SIZE_COUNT ? static_cast<uint8_t>(legacyFontSize + 1)
                                                  : static_cast<uint8_t>(CrossPointSettings::MEDIUM);
@@ -98,62 +104,28 @@ void CrossPointSettings::validateFrontButtonMapping(CrossPointSettings& settings
   }
 }
 
-bool CrossPointSettings::saveToFile() const {
-  if (!globalSettingsReadable) return false;
-  Storage.mkdir("/.crosspoint");
-  const bool bookSaved =
-      !usesBookReaderSettings() ||
-      (bookReaderSettingsReadable &&
-       JsonSettingsIO::saveBookReaderSettings(ReaderPreferences::capture(*this), true, bookReaderSettingsPath.c_str()));
-  const bool globalsSaved = JsonSettingsIO::saveSettings(*this, SETTINGS_FILE_JSON);
-  return bookSaved && globalsSaved;
-}
-
-void CrossPointSettings::beginBookReaderSettings(const std::string& bookId) {
-  endBookReaderSettings();
-  if (bookId.empty()) return;
-  BookIdentity::ensureStableDataDir(bookId);
-  bookReaderSettingsPath = BookIdentity::getStableDataFilePath(bookId, "reader-settings.json");
-  bookReaderSettingsReadable = true;
-  const bool recovered = JsonSettingsIO::recoverFile(bookReaderSettingsPath.c_str());
-  if (!Storage.exists(bookReaderSettingsPath.c_str())) {
-    bookReaderSettingsReadable = recovered || !Storage.exists((bookReaderSettingsPath + ".previous").c_str());
-    return;
+uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue) {
+  switch (legacyValue) {
+    case SLEEP_1_MIN:
+      return 1;
+    case SLEEP_5_MIN:
+      return 5;
+    case SLEEP_15_MIN:
+      return 15;
+    case SLEEP_30_MIN:
+      return 30;
+    case SLEEP_10_MIN:
+    default:
+      return 10;
   }
-  ReaderPreferences preferences = ReaderPreferences::capture(*this);
-  bool enabled = false;
-  bookReaderSettingsReadable =
-      JsonSettingsIO::loadBookReaderSettings(preferences, enabled, bookReaderSettingsPath.c_str());
-  if (bookReaderSettingsReadable && enabled) readerPreferenceScope.begin(*this, preferences);
 }
 
-void CrossPointSettings::endBookReaderSettings() {
-  readerPreferenceScope.end(*this);
-  bookReaderSettingsPath.clear();
-  bookReaderSettingsReadable = true;
-}
-
-bool CrossPointSettings::setBookReaderSettingsEnabled(const bool enabled) {
-  if (bookReaderSettingsPath.empty() || !bookReaderSettingsReadable) return false;
-  if (enabled == usesBookReaderSettings()) return true;
-  // Write first. A full/removed SD cannot turn a temporary in-memory choice into
-  // the loss of an existing book profile or a change to the global defaults.
-  const ReaderPreferences preferences = enabled ? ReaderPreferences::capture(*this) : persistedReaderPreferences();
-  if (!JsonSettingsIO::saveBookReaderSettings(preferences, enabled, bookReaderSettingsPath.c_str())) return false;
-  if (enabled)
-    readerPreferenceScope.begin(*this, preferences);
-  else
-    readerPreferenceScope.end(*this);
-  return true;
+bool CrossPointSettings::saveToFile() const {
+  Storage.mkdir("/.crosspoint");
+  return JsonSettingsIO::saveSettings(*this, SETTINGS_FILE_JSON);
 }
 
 bool CrossPointSettings::loadFromFile() {
-  globalSettingsReadable = true;
-  if (!JsonSettingsIO::recoverFile(SETTINGS_FILE_JSON) &&
-      Storage.exists((std::string(SETTINGS_FILE_JSON) + ".previous").c_str())) {
-    globalSettingsReadable = false;
-    return false;
-  }
   const std::string tempPath = std::string(SETTINGS_FILE_JSON) + ".tmp";
   if (!Storage.exists(SETTINGS_FILE_JSON) && Storage.exists(tempPath.c_str())) {
     if (Storage.rename(tempPath.c_str(), SETTINGS_FILE_JSON)) {
@@ -167,7 +139,6 @@ bool CrossPointSettings::loadFromFile() {
     if (!json.isEmpty()) {
       bool resave = false;
       bool result = JsonSettingsIO::loadSettings(*this, json.c_str(), &resave);
-      globalSettingsReadable = result;
       if (result && resave) {
         if (saveToFile()) {
           LOG_DBG("CPS", "Resaved settings to update format");
@@ -177,8 +148,6 @@ bool CrossPointSettings::loadFromFile() {
       }
       return result;
     }
-    globalSettingsReadable = false;
-    return false;
   }
 
   // Fall back to binary migration
@@ -199,7 +168,7 @@ bool CrossPointSettings::loadFromFile() {
 }
 
 bool CrossPointSettings::loadFromBinaryFile() {
-  FsFile inputFile;
+  HalFile inputFile;
   if (!Storage.openFileForRead("CPS", SETTINGS_FILE_BIN, inputFile)) {
     return false;
   }
@@ -246,14 +215,18 @@ bool CrossPointSettings::loadFromBinaryFile() {
     {
       uint8_t legacyFontSize = static_cast<uint8_t>(MEDIUM - 1);
       serialization::readPod(inputFile, legacyFontSize);
-      fontSize = migrateLegacyFontSize(legacyFontSize);
+      fontPointSize = legacyFontSizeSlotToPointSize(migrateLegacyFontSize(legacyFontSize));
     }
     if (++settingsRead >= fileSettingsCount) break;
     readAndValidate(inputFile, lineSpacing, LINE_COMPRESSION_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
     readAndValidate(inputFile, paragraphAlignment, PARAGRAPH_ALIGNMENT_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, sleepTimeout, SLEEP_TIMEOUT_COUNT);
+    {
+      uint8_t legacySleepTimeout = SLEEP_10_MIN;
+      readAndValidate(inputFile, legacySleepTimeout, SLEEP_TIMEOUT_COUNT);
+      sleepTimeoutMinutes = sleepTimeoutEnumToMinutes(legacySleepTimeout);
+    }
     if (++settingsRead >= fileSettingsCount) break;
     readAndValidate(inputFile, refreshFrequency, REFRESH_FREQUENCY_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
@@ -374,20 +347,46 @@ float CrossPointSettings::getReaderLineCompression() const {
 }
 
 unsigned long CrossPointSettings::getSleepTimeoutMs() const {
-  switch (sleepTimeout) {
-    case SLEEP_1_MIN:
-      return 1UL * 60 * 1000;
-    case SLEEP_5_MIN:
-      return 5UL * 60 * 1000;
-    case SLEEP_10_MIN:
-      return 10UL * 60 * 1000;
-    case SLEEP_15_MIN:
-      return 15UL * 60 * 1000;
-    case SLEEP_30_MIN:
-      return 30UL * 60 * 1000;
-    default:
-      return 10UL * 60 * 1000;
-  }
+  if (sleepTimeoutMinutes >= SLEEP_TIMEOUT_NEVER_MINUTES) return 0UL;
+  const uint8_t minutes =
+      std::clamp(sleepTimeoutMinutes, MIN_SLEEP_TIMEOUT_MINUTES, static_cast<uint8_t>(SLEEP_TIMEOUT_NEVER_MINUTES - 1));
+  return static_cast<unsigned long>(minutes) * 60UL * 1000UL;
+}
+
+CrossPointSettings::StatusBarSpec CrossPointSettings::statusBarSpec() const {
+  StatusBarSpec spec;
+  spec.showChapterPageCount = statusBarChapterPageCount != 0;
+  spec.showBookProgressPercent = statusBarBookProgressPercentage != 0;
+  spec.titleMode = statusBarTitle;
+  spec.showBattery = statusBarBattery != 0;
+  spec.showBatteryPercent = hideBatteryPercentage == HIDE_NEVER;
+  spec.clockMode = statusBarClock;
+  spec.clock12h = clockFormat == 1;
+  spec.clockUtcOffsetQ = clockUtcOffsetQ;
+  spec.progressBarMode = statusBarProgressBar;
+  spec.progressBarHeightPx =
+      statusBarProgressBar != HIDE_PROGRESS ? static_cast<uint8_t>((statusBarProgressBarThickness + 1) * 2) : 0;
+  spec.xtcMode = xtcStatusBarMode;
+  return spec;
+}
+
+ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWidth,
+                                                      const uint16_t viewportHeight) const {
+  ReaderRenderSpec spec;
+  spec.fontId = getReaderFontId();
+  spec.lineCompression = getReaderLineCompression();
+  spec.extraParagraphSpacing = extraParagraphSpacing != 0;
+  spec.forceParagraphIndents = forceParagraphIndents != 0;
+  spec.paragraphAlignment = paragraphAlignment;
+  spec.viewportWidth = viewportWidth;
+  spec.viewportHeight = viewportHeight;
+  spec.hyphenationEnabled = hyphenationEnabled != 0;
+  spec.embeddedStyle = embeddedStyle != 0;
+  spec.imageRendering = imageRendering;
+  // Only NORMAL bionic reading changes the layout (bold prefixes are wider);
+  // SUBTLE is a render-time effect and must not invalidate section caches.
+  spec.focusReadingEnabled = bionicReading == BIONIC_READING_NORMAL;
+  return spec;
 }
 
 uint64_t CrossPointSettings::getDailyGoalMs() const {
@@ -490,7 +489,18 @@ int CrossPointSettings::getRefreshFrequency() const {
       return 15;
     case REFRESH_30:
       return 30;
+    case REFRESH_NEVER:
+      // Effectively disables the periodic full refresh; the page counter
+      // never reaches the threshold in practice.
+      return std::numeric_limits<int>::max();
   }
+}
+
+void CrossPointSettings::clearSdFontFamily() {
+  sdFontFamilyName[0] = '\0';
+  fontPointSize =
+      snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES), fontPointSize);
+  saveToFile();
 }
 
 bool CrossPointSettings::getForcedReaderRefreshMode(HalDisplay::RefreshMode& mode) const {
@@ -511,42 +521,33 @@ bool CrossPointSettings::getForcedReaderRefreshMode(HalDisplay::RefreshMode& mod
 }
 
 int CrossPointSettings::getReaderFontId() const {
+  // Check SD card font first
   if (sdFontFamilyName[0] != '\0' && sdFontIdResolver) {
-    const int id = sdFontIdResolver(sdFontResolverCtx, sdFontFamilyName, fontSize);
+    const int id = sdFontIdResolver(sdFontResolverCtx, sdFontFamilyName, fontPointSize);
     if (id != 0) {
       return id;
     }
+    // Fall through to built-in if SD font not found
   }
 
-  switch (fontFamily) {
-    case BOOKERLY:
+  // A built-in family only exists at BUILTIN_READER_POINT_SIZES, so a size
+  // carried over from an SD family may not be one of them. ensureLoaded()
+  // normally persists the snap; snap again here (without allocating - this runs
+  // in the page render loop) so rendering is correct even before it has run.
+  const uint8_t pt =
+      snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES), fontPointSize);
+  const bool sans = (fontFamily == NOTOSANS);
+  switch (pt) {
+    case 10:
+      return sans ? NOTOSANS_10_FONT_ID : BOOKERLY_10_FONT_ID;
+    case 12:
+      return sans ? NOTOSANS_12_FONT_ID : BOOKERLY_12_FONT_ID;
+    case 16:
+      return sans ? NOTOSANS_16_FONT_ID : BOOKERLY_16_FONT_ID;
+    case 18:
+      return sans ? NOTOSANS_18_FONT_ID : BOOKERLY_18_FONT_ID;
+    case 14:
     default:
-      switch (fontSize) {
-        case X_SMALL:
-          return BOOKERLY_10_FONT_ID;
-        case SMALL:
-          return BOOKERLY_12_FONT_ID;
-        case MEDIUM:
-        default:
-          return BOOKERLY_14_FONT_ID;
-        case LARGE:
-          return BOOKERLY_16_FONT_ID;
-        case EXTRA_LARGE:
-          return BOOKERLY_18_FONT_ID;
-      }
-    case NOTOSANS:
-      switch (fontSize) {
-        case X_SMALL:
-          return NOTOSANS_10_FONT_ID;
-        case SMALL:
-          return NOTOSANS_12_FONT_ID;
-        case MEDIUM:
-        default:
-          return NOTOSANS_14_FONT_ID;
-        case LARGE:
-          return NOTOSANS_16_FONT_ID;
-        case EXTRA_LARGE:
-          return NOTOSANS_18_FONT_ID;
-      }
+      return sans ? NOTOSANS_14_FONT_ID : BOOKERLY_14_FONT_ID;
   }
 }

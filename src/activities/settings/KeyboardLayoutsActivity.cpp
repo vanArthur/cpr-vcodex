@@ -1,66 +1,84 @@
 #include "KeyboardLayoutsActivity.h"
 
+#include <GfxRenderer.h>
 #include <I18n.h>
 
 #include "CrossPointSettings.h"
-#include "activities/util/KeyboardLayoutSet.h"
+#include "I18nKeys.h"
+#include "MappedInputManager.h"
 #include "components/UITheme.h"
-#include "fontIds.h"
+
+namespace fui = freeink::ui;
+
 void KeyboardLayoutsActivity::onEnter() {
-  Activity::onEnter();
-  RenderLock lock(*this);
-  enabled = KeyboardLayoutSet::normalizeMask(SETTINGS.keyboardLayouts);
-  selected = 0;
-  requestUpdate();
+  UiListActivity::onEnter();
+  workingMask = keyboard_layouts::enabled();
+  edited = false;
+
+  for (int i = 0; i < keyboard_layouts::COUNT; ++i) {
+    rowItems[i].label = I18N.getLanguageName(keyboard_layouts::ALL[i].language);
+    rowItems[i].actionValue = static_cast<int16_t>(i);
+  }
 }
+
 void KeyboardLayoutsActivity::onExit() {
-  Activity::onExit();
-  if (SETTINGS.keyboardLayouts != enabled) {
-    SETTINGS.keyboardLayouts = enabled;
+  if (edited && workingMask != SETTINGS.keyboardLayouts) {
+    SETTINGS.keyboardLayouts = workingMask;
     SETTINGS.saveToFile();
   }
+  Activity::onExit();
 }
-void KeyboardLayoutsActivity::loop() {
-  RenderLock lock(*this);
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    finish();
+
+const char* KeyboardLayoutsActivity::headerTitle() const { return tr(STR_KEYBOARD_LAYOUTS); }
+
+bool KeyboardLayoutsActivity::isLocked(const uint8_t i) const {
+  const uint16_t bit = keyboard_layouts::bitAt(i);
+  if (!(workingMask & bit)) return false;
+  const uint16_t without = static_cast<uint16_t>(workingMask & ~bit);
+  return (without & keyboard_layouts::LATIN_BITS) == 0;
+}
+
+void KeyboardLayoutsActivity::activateIndex(const int index) {
+  nav.selected = index;
+  // The row stays on screen with a new ON/OFF value; a lingering flash would
+  // gray an unrelated row on the repaint below.
+  app.clearTapFlash();
+
+  if (isLocked(static_cast<uint8_t>(index))) {
+    requestUpdate();
     return;
   }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    const uint8_t candidate = enabled ^ (1u << selected);
-    // Reject disabling the final Latin layout without changing another checkbox.
-    if (candidate & 0x0F) enabled = KeyboardLayoutSet::normalizeMask(candidate);
-    requestUpdate();
-  }
-  navigator.onNextRelease([this] {
-    selected = ButtonNavigator::nextIndex(selected, KeyboardLayoutSet::COUNT);
-    requestUpdate();
-  });
-  navigator.onPreviousRelease([this] {
-    selected = ButtonNavigator::previousIndex(selected, KeyboardLayoutSet::COUNT);
-    requestUpdate();
-  });
+
+  const uint16_t bit = keyboard_layouts::bitAt(static_cast<uint8_t>(index));
+  workingMask = static_cast<uint16_t>(workingMask ^ bit);
+  edited = true;
+  requestUpdate();
 }
-void KeyboardLayoutsActivity::render(RenderLock&&) {
-  renderer.clearScreen();
+
+void KeyboardLayoutsActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int width = renderer.getScreenWidth();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, width, metrics.headerHeight}, tr(STR_KEYBOARD_LAYOUTS));
-  const int top = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int hintHeight = renderer.getLineHeight(SMALL_FONT_ID) + metrics.verticalSpacing;
-  renderer.drawCenteredText(SMALL_FONT_ID, top, tr(STR_KB_LATIN_REQUIRED));
-  const auto getter = [](const void*, uint32_t row) { return KeyboardLayoutSet::name(row); };
-  renderer.prewarmFallbackText(UI_10_FONT_ID, getter, nullptr, KeyboardLayoutSet::COUNT);
-  GUI.drawList(
-      renderer,
-      Rect{0, top + hintHeight, width,
-           renderer.getScreenHeight() - top - hintHeight - metrics.buttonHintsHeight - metrics.verticalSpacing},
-      KeyboardLayoutSet::COUNT, selected, [](int row) { return std::string(KeyboardLayoutSet::name(row)); }, nullptr,
-      nullptr,
-      [this](int row) {
-        return std::string(I18N.get(enabled & (1u << row) ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF));
-      });
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  // Content: the safe area minus the header band GUI.drawHeader paints.
+  screen.setContentMargin(fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
+                                      static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
+                                      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)),
+                                      static_cast<int16_t>(safe.x)});
+  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+
+  for (int i = 0; i < keyboard_layouts::COUNT; ++i) {
+    const uint8_t row = static_cast<uint8_t>(i);
+    if (isLocked(row)) {
+      rowItems[i].value = tr(STR_DEFAULT_VALUE);
+    } else {
+      rowItems[i].value = (workingMask & keyboard_layouts::bitAt(row)) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    }
+  }
+
+  fui::ListProps props;
+  props.items = rowItems;
+  props.count = keyboard_layouts::COUNT;
+  props.action = ACTION_ROW;
+  props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  syncListViewport(screen, props);
+  screen.list(props);
 }

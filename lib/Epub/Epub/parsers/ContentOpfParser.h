@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "Epub.h"
-#include "OpfItemIndex.h"
 #include "expat.h"
 
 class BookMetadataCache;
@@ -30,17 +29,21 @@ class ContentOpfParser final : public Print {
   XML_Parser parser = nullptr;
   ParserState state = START;
   BookMetadataCache* cache;
-  FsFile tempItemStore;
+  HalFile tempItemStore;
   std::string coverItemId;
   bool hasExplicitStartReference = false;
 
   // Index for fast idref→href lookup (binary search over .items.bin)
-  using ItemIndexEntry = OpfItemIndex::Entry;
-  OpfItemIndex itemIndex;
+  struct ItemIndexEntry {
+    uint32_t idHash;      // FNV-1a hash of itemId
+    uint16_t idLen;       // length for collision reduction
+    uint32_t fileOffset;  // offset in .items.bin
+  };
+  std::deque<ItemIndexEntry> itemIndex;
   bool useItemIndex = false;
 
   // FNV-1a hash function
-  static uint32_t fnvHash(std::string_view s) {
+  static uint32_t fnvHash(const std::string& s) {
     uint32_t hash = 2166136261u;
     for (char c : s) {
       hash ^= static_cast<uint8_t>(c);
@@ -52,7 +55,6 @@ class ContentOpfParser final : public Print {
   static void startElement(void* userData, const XML_Char* name, const XML_Char** atts);
   static void characterData(void* userData, const XML_Char* s, int len);
   static void endElement(void* userData, const XML_Char* name);
-  void fail(const char* reason);
 
  public:
   std::string title;

@@ -79,7 +79,6 @@ class ChapterHtmlSlimParser {
   uint16_t viewportHeight;
   bool hyphenationEnabled;
   bool focusReadingEnabled;
-  uint8_t wordSpacing;
   CssParser* cssParser;
   bool embeddedStyle;
   uint8_t imageRendering;
@@ -88,7 +87,6 @@ class ChapterHtmlSlimParser {
   int imageCounter = 0;
   bool lowMemoryImageFallback = false;
   bool lowMemoryAbort = false;
-  bool htmlEnded_ = false;
   bool attemptedTextLayoutFontCacheRelease = false;
   bool loggedSoftLowMemoryContinuation = false;
 
@@ -106,9 +104,14 @@ class ChapterHtmlSlimParser {
     bool hasItalic = false, italic = false;
     bool hasUnderline = false, underline = false;
     bool hasStrikeThrough = false, strikeThrough = false;
+    // Upstream RTL support: CSS `direction` / HTML dir inherited through the stack.
+    // setsParagraphDirection marks <html>/<body> entries whose direction defines
+    // the paragraph base direction (inline dir changes do not).
+    bool hasDirection = false;
+    CssTextDirection direction = CssTextDirection::Ltr;
+    bool setsParagraphDirection = false;
     bool hasSup = false, sup = false;
     bool hasSub = false, sub = false;
-    bool hasSmallCaps = false, smallCaps = false;
   };
   std::vector<StyleStackEntry> inlineStyleStack;
   std::vector<BlockStyle> blockStyleStack;  // accumulated block styles from open ancestor elements
@@ -117,9 +120,10 @@ class ChapterHtmlSlimParser {
   bool effectiveItalic = false;
   bool effectiveUnderline = false;
   bool effectiveStrikeThrough = false;
+  bool effectiveDirectionDefined = false;
+  CssTextDirection effectiveDirection = CssTextDirection::Ltr;
   bool effectiveSup = false;
   bool effectiveSub = false;
-  bool effectiveSmallCaps = false;
 
   struct BufferedTableCell {
     std::unique_ptr<ParsedText> text;
@@ -168,20 +172,22 @@ class ChapterHtmlSlimParser {
   uint32_t currentPageVisibleOffset = 0;
   bool currentPageVisibleOffsetSet = false;
   bool insideBody = false;
+  bool htmlEnded_ = false;  // </html> seen: trailing junk after it is not a parse error
   bool syntheticCharacterData = false;
   uint16_t nonVisibleTextDepth = 0;
 
   // Footnote link tracking
   bool insideFootnoteLink = false;
   int footnoteLinkDepth = -1;
+  uint8_t currentFootnoteLinkId = 0;  // ParsedText link target id for the open internal link
   FootnoteEntry currentFootnote = {};
   int currentFootnoteLinkTextLen = 0;
   std::vector<std::pair<int, FootnoteEntry>> pendingFootnotes;  // <wordIndex, entry>
   int wordsExtractedInBlock = 0;
 
   void updateEffectiveInlineStyle();
-  static void applyVerticalAlignToEntry(StyleStackEntry& entry, const CssStyle& style);
-  static void applySmallCapsToEntry(StyleStackEntry& entry, const CssStyle& style);
+  static void applyDirectionToEntry(StyleStackEntry& entry, const CssStyle& css);
+  static void applyVerticalAlignToEntry(StyleStackEntry& entry, const CssStyle& css);
   bool shouldAbortForLowMemory(const char* stage);
   bool startNewPage(const char* reason);
   void collectReferencedAnchors();
@@ -217,7 +223,6 @@ class ChapterHtmlSlimParser {
                                  const bool forceParagraphIndents, const uint8_t paragraphAlignment,
                                  const uint16_t viewportWidth, const uint16_t viewportHeight,
                                  const bool hyphenationEnabled, const bool focusReadingEnabled,
-                                 const uint8_t wordSpacing,
                                  const std::function<void(std::unique_ptr<Page>, ParagraphLutEntry)>& completePageFn,
                                  const bool embeddedStyle, const std::string& contentBase,
                                  const std::string& imageBasePath, const uint8_t imageRendering = 0,
@@ -236,7 +241,6 @@ class ChapterHtmlSlimParser {
         viewportHeight(viewportHeight),
         hyphenationEnabled(hyphenationEnabled),
         focusReadingEnabled(focusReadingEnabled),
-        wordSpacing(std::min<uint8_t>(wordSpacing, 4)),
         completePageFn(completePageFn),
         popupFn(popupFn),
         cssParser(cssParser),

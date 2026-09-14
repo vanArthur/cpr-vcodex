@@ -9,6 +9,8 @@
 
 #include <Xtc.h>
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -20,12 +22,15 @@ class XtcReaderActivity final : public Activity {
   std::string stableBookId;
 
   uint32_t currentPage = 0;
-  bool exitingReader = false;
   int pagesUntilFullRefresh = 0;
   bool pendingForceFullRefresh = false;
   bool waitingForConfirmSecondClick = false;
   unsigned long firstConfirmClickMs = 0UL;
-  EndOfBookOptions endOfBookOptions;
+
+  // End-of-book next-book suggestions (upstream). Built lazily on the render
+  // task; the ready flag is the release/acquire publication point for loop().
+  std::unique_ptr<EndOfBookOptions> endOfBookOptions;
+  std::atomic<bool> endOfBookOptionsReady{false};
 
   enum class StatusBarOverlayPosition { Bottom, Top };
   struct StatusBarInfo {
@@ -34,19 +39,26 @@ class XtcReaderActivity final : public Activity {
     std::string title;
   };
 
-  bool renderPage(uint32_t pageToRender);
+  void renderPage();
+  void renderEndOfBook();
   void renderStatusBarOverlay(StatusBarOverlayPosition position) const;
   StatusBarInfo getStatusBarInfo() const;
-  void saveProgress(uint32_t pageToSave, bool updateStats = true) const;
+  void saveProgress() const;
   void loadProgress();
-  bool progressPersistenceBlocked = false;
+  void openChapterSelection();
+  bool isAtEndOfBook() const { return xtc && currentPage >= xtc->getPageCount(); }
+  void returnFromEndOfBook();
+  bool endOfBookMenuActive() const;
+  bool handleEndOfBookMenu();
+  void clearEndOfBookOptionsIfNeeded();
+  bool handleBackNavigation();
   void requestCurrentPageFullRefresh();
   std::string moveCompletedBookIfEnabled();
   void exitReaderAfterOptionalCompletedMove();
 
  public:
-  explicit XtcReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Xtc> xtc)
-      : Activity("XtcReader", renderer, mappedInput), xtc(std::move(xtc)) {}
+  explicit XtcReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Xtc> xtc,
+                             bool allowFastInitialRefresh = false);
   void onEnter() override;
   void onExit() override;
   void loop() override;

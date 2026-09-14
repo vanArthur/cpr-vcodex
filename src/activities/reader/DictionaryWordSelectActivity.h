@@ -4,29 +4,26 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "../Activity.h"
-#include "SelectionPageStepper.h"
+#include "activities/Activity.h"
 
+// Word selection over the current reader page (fork StarDict dictionary +
+// highlight mode). Buttons step through words/rows; on touch boards a
+// touch-down moves the highlight and a tap on a word looks it up (or, in
+// highlight mode, sets the selection anchor / end) directly.
 class DictionaryWordSelectActivity final : public Activity {
  public:
-  using PageLoader = std::function<SelectionPageResult(SelectionPageRequest)>;
   DictionaryWordSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::shared_ptr<Page> page,
-                               int readerFontId, int marginLeft, int marginTop, bool highlightPhraseMode = false,
-                               PageLoader pageLoader = {}, uint16_t spine = 0, uint16_t pageIndex = 0)
+                               int readerFontId, int marginLeft, int marginTop, bool highlightPhraseMode = false)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         readerFontId(readerFontId),
         marginLeft(marginLeft),
         marginTop(marginTop),
-        highlightPhraseMode(highlightPhraseMode),
-        pageLoader(std::move(pageLoader)),
-        selectionSpine(spine),
-        selectionPage(pageIndex) {}
+        highlightPhraseMode(highlightPhraseMode) {}
 
   void onEnter() override;
   void onExit() override;
@@ -44,7 +41,6 @@ class DictionaryWordSelectActivity final : public Activity {
     int16_t row = 0;
     int continuationIndex = -1;
     int continuationOf = -1;
-    uint16_t flow = 0;
   };
 
   struct Row {
@@ -79,22 +75,6 @@ class DictionaryWordSelectActivity final : public Activity {
   int currentWordInRow = 0;
   int anchorWordIndex = -1;
   bool highlightPhraseMode = false;
-  PageLoader pageLoader;
-  uint16_t selectionSpine = 0;
-  uint16_t selectionPage = 0;
-  int pendingPageDirection = 0;
-  int selectionDirection = 0;
-  bool selectionPageError = false;
-  struct SavedFragment {
-    HighlightFragment fragment;
-    int anchor;
-  };
-  std::vector<SavedFragment> selectedFragments;
-  static constexpr size_t MAX_SELECTION_PAGES = 4;
-  void stepSelectionPage(int direction);
-  void acceptSelectionPage(SelectionPageResult result);
-  HighlightFragment makeSelectionFragment(int from, int to) const;
-  bool selectionFits(int from, int to) const;
   SelectionRegionCache selectionRegions[MAX_SELECTION_REGIONS];
   size_t selectionRegionCount = 0;
 
@@ -104,6 +84,11 @@ class DictionaryWordSelectActivity final : public Activity {
   void mergeHyphenatedWords();
   void moveRow(int delta);
   void moveWord(int delta);
+  // Touch helpers (upstream): word under a touch point (finger slop included),
+  // -1 when none; and moving the cursor straight to a word index.
+  int wordAt(int x, int y) const;
+  bool selectWordIndex(int index);
+  void cancelSelection();
   void lookupSelectedWord();
   void confirmHighlightSelection();
   std::string buildSelectedText(int from, int to) const;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(crosspoint_reader_tests CXX)
+project(crosspoint_reader_tests C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,6 +28,10 @@ add_library(crosspoint_test_common INTERFACE)
 target_include_directories(crosspoint_test_common INTERFACE
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
+  ${REPO_ROOT}/lib/MiniBidi
+  ${REPO_ROOT}/lib/MemoryBudget
+  ${REPO_ROOT}/lib/Memory
+  ${REPO_ROOT}/lib/Serialization
 )
 if(MSVC)
   target_compile_options(crosspoint_test_common INTERFACE /W4)
@@ -42,21 +46,28 @@ endif()
 enable_testing()
 include(GoogleTest)
 
+# Upstream suites
+add_subdirectory(streaming_json_parser)
+add_subdirectory(release_json_parser)
+add_subdirectory(differential_rounding)
+add_subdirectory(hyphenation_eval)
 add_subdirectory(utf8_compose)
-add_subdirectory(reader_position)
-add_subdirectory(gray_pipeline)
+add_subdirectory(opds_filename)
+add_subdirectory(html_to_plain_text)
+add_subdirectory(minibidi_arabic)
+add_subdirectory(combining_marks)
 add_subdirectory(credential_integrity)
+add_subdirectory(xml_parser_utils)
+add_subdirectory(token_boundary)
+add_subdirectory(font_cache_manager)
+add_subdirectory(css_parser)
+add_subdirectory(chapter_html_slim_parser)
+add_subdirectory(ligature_guard)
+add_subdirectory(page_link)
+
+# Fork (CPR-vCodex) suites
+add_subdirectory(reader_position)
 add_subdirectory(reader_regressions)
-add_subdirectory(persistence)
-add_subdirectory(web_paths)
-add_subdirectory(xtc_streaming)
-add_subdirectory(reader_io_regressions)
-add_subdirectory(font_cache_regressions)
-add_subdirectory(file_index)
-add_subdirectory(nearby_transfer)
-add_subdirectory(dictionary_regressions)
-add_subdirectory(keyboard_input)
-add_subdirectory(epub_memory)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
@@ -64,12 +75,8 @@ if(Python3_Interpreter_FOUND)
     NAME web_optimizer_regressions
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/web_optimizer_regressions/EpubOptimizerFallbackTest.py
   )
-endif()
-
-find_program(NODE_EXECUTABLE NAMES node node.exe)
-if(NODE_EXECUTABLE)
   add_test(
-    NAME web_optimizer_node_regressions
-    COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/web_optimizer_regressions/EpubOptimizerTransformTest.js
+    NAME web_flash_regressions
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/web_flash_regressions/FlashPageTest.py
   )
 endif()

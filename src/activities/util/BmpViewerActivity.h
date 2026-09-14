@@ -1,12 +1,10 @@
 #pragma once
 
-#include <FileIndex.h>
-
 #include <functional>
 #include <string>
 
-#include "../Activity.h"
 #include "MappedInputManager.h"
+#include "activities/Activity.h"
 
 class BmpViewerActivity final : public Activity {
  public:
@@ -20,14 +18,10 @@ class BmpViewerActivity final : public Activity {
  private:
   void loadSiblingImages();
   void doSetSleepCover();
-  bool renderPngImage();
-  void drawImageError();
-  void goToSibling(size_t index);
+  bool canSetSleepCover() const;
+  bool renderPng();
 
   std::string filePath;
-  FileIndex siblingIndex;
-  std::unique_ptr<FileIndex::Entry> siblingEntry;
-  size_t siblingCount = 0;
-  bool imageLoaded = false;
+  std::vector<std::string> siblingImages;
   int currentImageIndex = -1;
 };

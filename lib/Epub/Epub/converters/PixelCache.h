@@ -8,8 +8,6 @@
 #include <cstring>
 #include <string>
 
-#include "PixelCacheFormat.h"
-
 // Streaming cache writer for 2-bit pixels (4 levels). Packs 4 pixels per byte,
 // MSB first.
 //
@@ -62,8 +60,7 @@ struct PixelCache {
 
   // Open the cache file, write the header, and allocate a band buffer big enough
   // to hold the tallest single decode block (maxBlockDstRows output rows).
-  bool begin(const std::string& cachePath, int w, int h, int ox, int oy, int maxBlockDstRows,
-             PixelCacheVariant variant) {
+  bool begin(const std::string& cachePath, int w, int h, int ox, int oy, int maxBlockDstRows) {
     width = w;
     height = h;
     originX = ox;
@@ -107,14 +104,9 @@ struct PixelCache {
     }
     cachePathStr = cachePath;
 
-    // Header: magic, version, variant, width, height. See PixelCacheFormat.h.
-    const uint16_t magic = PXC_MAGIC;
-    const uint8_t version = PXC_VERSION;
-    const uint8_t variantByte = static_cast<uint8_t>(variant);
     uint16_t w16 = (uint16_t)w;
     uint16_t h16 = (uint16_t)h;
-    if (file.write(&magic, 2) != 2 || file.write(&version, 1) != 1 || file.write(&variantByte, 1) != 1 ||
-        file.write(&w16, 2) != 2 || file.write(&h16, 2) != 2) {
+    if (file.write(&w16, 2) != 2 || file.write(&h16, 2) != 2) {
       LOG_ERR("IMG", "Failed to write cache header: %s", cachePath.c_str());
       abort();
       return false;
@@ -165,8 +157,8 @@ struct PixelCache {
       }
     }
     file.close();
-    LOG_DBG("IMG", "Cache written: %s (%dx%d, %u bytes)", cachePathStr.c_str(), width, height,
-            static_cast<unsigned>(PXC_HEADER_BYTES + static_cast<size_t>(bytesPerRow) * height));
+    LOG_DBG("IMG", "Cache written: %s (%dx%d, %d bytes)", cachePathStr.c_str(), width, height,
+            4 + bytesPerRow * height);
     ok = false;  // file handed off; nothing left to clean up
     return true;
   }

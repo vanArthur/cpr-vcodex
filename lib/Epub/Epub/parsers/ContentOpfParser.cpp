@@ -2,13 +2,12 @@
 
 #include <FsHelpers.h>
 #include <Logging.h>
-#include <MemoryBudget.h>
 #include <Serialization.h>
 #include <XmlParserUtils.h>
 
 #include <cctype>
 
-#include "../BookMetadataCache.h"
+#include "Epub/BookMetadataCache.h"
 
 namespace {
 constexpr char MEDIA_TYPE_NCX[] = "application/x-dtbncx+xml";
@@ -31,32 +30,7 @@ bool startsWithImageMediaType(const std::string& mediaType) {
 
   return true;
 }
-
-bool writeItemString(FsFile& file, std::string_view value) {
-  if (value.size() > UINT32_MAX) return false;
-  const uint32_t length = static_cast<uint32_t>(value.size());
-  return file.write(reinterpret_cast<const uint8_t*>(&length), sizeof(length)) == sizeof(length) &&
-         file.write(reinterpret_cast<const uint8_t*>(value.data()), length) == length;
-}
-
-bool readItemHref(FsFile& file, std::string& value) {
-  uint32_t length = 0;
-  if (file.read(&length, sizeof(length)) != sizeof(length) || file.position() > file.fileSize64() ||
-      length > file.fileSize64() - file.position())
-    return false;
-  const auto heap = MemoryBudget::snapshot();
-  if (length > UINT32_MAX - 48 * 1024 ||
-      !MemoryBudget::hasHeap(heap, length + 48 * 1024, std::max<uint32_t>(8192, length + 1)))
-    return false;
-  value.resize(length);
-  return file.read(value.data(), length) == static_cast<int>(length);
-}
 }  // namespace
-
-void ContentOpfParser::fail(const char* reason) {
-  LOG_ERR("COF", "%s", reason);
-  if (parser) XML_StopParser(parser, XML_FALSE);
-}
 
 bool ContentOpfParser::setup() {
   parser = XML_ParserCreate(nullptr);
@@ -85,7 +59,7 @@ ContentOpfParser::~ContentOpfParser() {
 size_t ContentOpfParser::write(const uint8_t data) { return write(&data, 1); }
 
 size_t ContentOpfParser::write(const uint8_t* buffer, const size_t size) {
-  if (!parser || size > remainingSize || (!buffer && size)) return 0;
+  if (!parser) return 0;
 
   const uint8_t* currentBufferPos = buffer;
   auto remainingInBuffer = size;
@@ -152,7 +126,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
   if (self->state == IN_PACKAGE && xmlLocalNameEquals(name, "manifest")) {
     self->state = IN_MANIFEST;
     if (!Storage.openFileForWrite("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
-      self->fail("Could not open manifest staging file");
+      LOG_ERR("COF", "Couldn't open temp items file for writing. This is probably going to be a fatal error.");
     }
     return;
   }
@@ -160,15 +134,16 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
   if (self->state == IN_PACKAGE && xmlLocalNameEquals(name, "spine")) {
     self->state = IN_SPINE;
     if (!Storage.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
-      self->fail("Could not read manifest staging file");
-      return;
+      LOG_ERR("COF", "Couldn't open temp items file for reading. This is probably going to be a fatal error.");
     }
 
     // Sort the (unconditionally-built) item index so every idref lookup uses binary
     // search. Without this, small/medium manifests fell back to an O(spine × manifest)
     // linear rescan of .items.bin per itemref (up to ~200ms/item at large scale).
     if (!self->itemIndex.empty()) {
-      self->itemIndex.sort();
+      std::sort(self->itemIndex.begin(), self->itemIndex.end(), [](const ItemIndexEntry& a, const ItemIndexEntry& b) {
+        return a.idHash < b.idHash || (a.idHash == b.idHash && a.idLen < b.idLen);
+      });
       self->useItemIndex = true;
       LOG_DBG("COF", "Using fast index for %zu manifest items", self->itemIndex.size());
     }
@@ -204,7 +179,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
   }
 
   if (self->state == IN_MANIFEST && xmlLocalNameEquals(name, "item")) {
-    std::string_view itemId;
+    std::string itemId;
     std::string href;
     std::string mediaType;
     std::string properties;
@@ -223,27 +198,16 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
     // Record index entry for fast lookup later
     if (self->tempItemStore) {
-      const auto heap = MemoryBudget::snapshot();
-      if (!MemoryBudget::hasHeap(heap, 48 * 1024, 8192) || itemId.size() > UINT32_MAX ||
-          self->tempItemStore.position() > UINT32_MAX) {
-        self->fail("Insufficient memory or range for manifest index");
-        return;
-      }
       ItemIndexEntry entry;
       entry.idHash = fnvHash(itemId);
-      entry.idLen = static_cast<uint32_t>(itemId.size());
+      entry.idLen = static_cast<uint16_t>(itemId.size());
       entry.fileOffset = static_cast<uint32_t>(self->tempItemStore.position());
-      if (!self->itemIndex.append(entry)) {
-        self->fail("Could not allocate manifest index chunk");
-        return;
-      }
+      self->itemIndex.push_back(entry);
     }
 
     // Write items down to SD card
-    if (!writeItemString(self->tempItemStore, itemId) || !writeItemString(self->tempItemStore, href)) {
-      self->fail("Failed writing manifest staging file");
-      return;
-    }
+    serialization::writeString(self->tempItemStore, itemId);
+    serialization::writeString(self->tempItemStore, href);
 
     if (itemId == self->coverItemId) {
       // Some EPUBs set meta name="cover" to an XHTML wrapper item.
@@ -251,8 +215,8 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       if (startsWithImageMediaType(mediaType)) {
         self->coverItemHref = href;
       } else {
-        LOG_DBG("COF", "Ignoring meta cover item '%.*s' with non-image media type: %s", static_cast<int>(itemId.size()),
-                itemId.data(), mediaType.c_str());
+        LOG_DBG("COF", "Ignoring meta cover item '%s' with non-image media type: %s", itemId.c_str(),
+                mediaType.c_str());
       }
     }
 
@@ -294,50 +258,42 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
     if (self->state == IN_SPINE && xmlLocalNameEquals(name, "itemref")) {
       for (int i = 0; atts[i]; i += 2) {
         if (strcmp(atts[i], "idref") == 0) {
-          const std::string_view idref = atts[i + 1];
+          const std::string idref = atts[i + 1];
           std::string href;
           bool found = false;
 
           if (self->useItemIndex) {
             // Fast path: binary search
             uint32_t targetHash = fnvHash(idref);
-            if (idref.size() > UINT32_MAX) {
-              self->fail("Manifest ID exceeds stored format");
-              return;
-            }
-            uint32_t targetLen = static_cast<uint32_t>(idref.size());
-            size_t index = self->itemIndex.lowerBound(targetHash, targetLen);
+            uint16_t targetLen = static_cast<uint16_t>(idref.size());
+
+            auto it = std::lower_bound(self->itemIndex.begin(), self->itemIndex.end(),
+                                       ItemIndexEntry{targetHash, targetLen, 0},
+                                       [](const ItemIndexEntry& a, const ItemIndexEntry& b) {
+                                         return a.idHash < b.idHash || (a.idHash == b.idHash && a.idLen < b.idLen);
+                                       });
 
             // Check for match (may need to check a few due to hash collisions)
-            while (index < self->itemIndex.size() && self->itemIndex[index].idHash == targetHash &&
-                   self->itemIndex[index].idLen == targetLen) {
-              bool matches = false;
-              if (!self->tempItemStore.seek(self->itemIndex[index].fileOffset) ||
-                  !readStoredOpfId(self->tempItemStore, idref, matches)) {
-                self->fail("Truncated manifest ID");
-                return;
-              }
-              if (matches) {
-                if (!readItemHref(self->tempItemStore, href)) {
-                  self->fail("Could not read manifest href");
-                  return;
-                }
+            while (it != self->itemIndex.end() && it->idHash == targetHash) {
+              self->tempItemStore.seek(it->fileOffset);
+              std::string itemId;
+              serialization::readString(self->tempItemStore, itemId);
+              if (itemId == idref) {
+                serialization::readString(self->tempItemStore, href);
                 found = true;
                 break;
               }
-              ++index;
+              ++it;
             }
           } else {
             // Fallback linear scan, only reached when the index is empty (no manifest
             // items). The fast binary-search path above is used for all real manifests.
             self->tempItemStore.seek(0);
+            std::string itemId;
             while (self->tempItemStore.available()) {
-              bool matches = false;
-              if (!readStoredOpfId(self->tempItemStore, idref, matches) || !readItemHref(self->tempItemStore, href)) {
-                self->fail("Could not scan manifest staging file");
-                return;
-              }
-              if (matches) {
+              serialization::readString(self->tempItemStore, itemId);
+              serialization::readString(self->tempItemStore, href);
+              if (itemId == idref) {
                 found = true;
                 break;
               }
@@ -346,9 +302,6 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
           if (found && self->cache) {
             self->cache->createSpineEntry(href);
-          } else if (!found) {
-            self->fail("Spine references an item absent from the manifest");
-            return;
           }
         }
       }
@@ -367,12 +320,13 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       }
     }
     if (!guideHref.empty()) {
-      // EPUB 2 guides often mark every content file as "text". Only the
-      // explicit "start" semantic identifies a reliable reading location.
+      // EPUB 2 guides often mark every content file as "text", so that type
+      // does not identify a reliable first-reading location. Only use the
+      // explicit "start" semantic; otherwise the reader opens at spine index 0.
       if (type == "start" && !self->hasExplicitStartReference) {
         LOG_DBG("COF", "Found %s reference in guide: %s", type.c_str(), guideHref.c_str());
         self->textReferenceHref = guideHref;
-        self->hasExplicitStartReference = true;
+        self->hasExplicitStartReference = type == "start";
       } else if ((type == "cover" || type == "cover-page") && self->guideCoverPageHref.empty()) {
         LOG_DBG("COF", "Found cover reference in guide: %s", guideHref.c_str());
         self->guideCoverPageHref = guideHref;
@@ -422,7 +376,7 @@ void XMLCALL ContentOpfParser::endElement(void* userData, const XML_Char* name) 
 
   if (self->state == IN_MANIFEST && xmlLocalNameEquals(name, "manifest")) {
     self->state = IN_PACKAGE;
-    if (!self->tempItemStore.close()) self->fail("Failed closing manifest staging file");
+    self->tempItemStore.close();
     return;
   }
 

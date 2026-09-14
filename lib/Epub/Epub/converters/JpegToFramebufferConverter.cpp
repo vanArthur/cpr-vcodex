@@ -9,11 +9,9 @@
 #include <MemoryBudget.h>
 
 #include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <new>
 
-#include "AdaptiveTone.h"
 #include "DirectPixelWriter.h"
 #include "DitherUtils.h"
 #include "PixelCache.h"
@@ -22,7 +20,7 @@ namespace {
 
 // Context struct passed through JPEGDEC callbacks to avoid global mutable state.
 // The draw callback receives this via pDraw->pUser (set by setUserPointer()).
-// The file I/O callbacks receive the FsFile* via pFile->fHandle (set by jpegOpen()).
+// The file I/O callbacks receive the HalFile* via pFile->fHandle (set by jpegOpen()).
 struct JpegContext {
   GfxRenderer* renderer{nullptr};
   const RenderConfig* config{nullptr};
@@ -50,16 +48,13 @@ struct JpegContext {
   PixelCache cache;
   bool caching{false};
 
-  // Per-image tone curve, built from a cheap 1/8-scale histogram pre-pass.
-  // Identity unless the image's dynamic range is narrow enough to benefit.
-  AdaptiveTone tone;
-  uint32_t lastYieldMs{0};
+  uint32_t lastYieldMs{0};  // throttle state for yieldDuringDecode()
 };
 
-// File I/O callbacks use pFile->fHandle to access the FsFile*,
+// File I/O callbacks use pFile->fHandle to access the HalFile*,
 // avoiding the need for global file state.
 void* jpegOpen(const char* filename, int32_t* size) {
-  FsFile* f = new FsFile();
+  HalFile* f = new HalFile();
   if (!Storage.openFileForRead("JPG", std::string(filename), *f)) {
     delete f;
     return nullptr;
@@ -69,7 +64,7 @@ void* jpegOpen(const char* filename, int32_t* size) {
 }
 
 void jpegClose(void* handle) {
-  FsFile* f = reinterpret_cast<FsFile*>(handle);
+  HalFile* f = reinterpret_cast<HalFile*>(handle);
   if (f) {
     f->close();
     delete f;
@@ -81,7 +76,7 @@ void jpegClose(void* handle) {
 // MUST maintain iPos to match the actual file position, otherwise progressive
 // JPEGs with large headers fail during parsing.
 int32_t jpegRead(JPEGFILE* pFile, uint8_t* pBuf, int32_t len) {
-  FsFile* f = reinterpret_cast<FsFile*>(pFile->fHandle);
+  HalFile* f = reinterpret_cast<HalFile*>(pFile->fHandle);
   if (!f) return 0;
   int32_t bytesRead = f->read(pBuf, len);
   if (bytesRead < 0) return 0;
@@ -90,7 +85,7 @@ int32_t jpegRead(JPEGFILE* pFile, uint8_t* pBuf, int32_t len) {
 }
 
 int32_t jpegSeek(JPEGFILE* pFile, int32_t pos) {
-  FsFile* f = reinterpret_cast<FsFile*>(pFile->fHandle);
+  HalFile* f = reinterpret_cast<HalFile*>(pFile->fHandle);
   if (!f) return -1;
   if (!f->seek(pos)) return -1;
   pFile->iPos = pos;
@@ -125,74 +120,6 @@ constexpr int FP_SHIFT = 16;
 constexpr int32_t FP_ONE = 1 << FP_SHIFT;
 constexpr int32_t FP_MASK = FP_ONE - 1;
 
-// Histogram accumulator for the adaptive-tone pre-pass. Draws nothing; the
-// user pointer is a 256-entry bin array.
-struct JpegHistogram {
-  uint32_t bins[256];
-  uint32_t total;
-};
-
-int jpegHistogramCallback(JPEGDRAW* pDraw) {
-  auto* hist = reinterpret_cast<JpegHistogram*>(pDraw->pUser);
-  if (!hist) return 0;
-
-  const uint8_t* pixels = reinterpret_cast<const uint8_t*>(pDraw->pPixels);
-  const int stride = pDraw->iWidth;
-  const int validW = pDraw->iWidthUsed;
-  const int blockH = pDraw->iHeight;
-  if (!pixels || stride <= 0 || validW <= 0 || blockH <= 0) return 1;
-
-  for (int row = 0; row < blockH; row++) {
-    const uint8_t* p = pixels + static_cast<size_t>(row) * stride;
-    for (int col = 0; col < validW; col++) {
-      hist->bins[p[col]]++;
-    }
-  }
-  hist->total += static_cast<uint32_t>(validW) * static_cast<uint32_t>(blockH);
-  return 1;
-}
-
-// Decode the image at 1/8 scale purely to sample its tonal distribution, then
-// build the tone curve from it. 1/8 scale keeps this to ~1/64 of the pixel
-// work of the real decode (the entropy decode still runs, so call it roughly a
-// third of a full pass) and it only happens when the pixel cache is being
-// built — every later view of the page reads the cached 2-bit pixels and pays
-// nothing. On any failure the tone stays identity and the image renders
-// exactly as before.
-void buildAdaptiveTone(JPEGDEC& jpeg, const std::string& imagePath, AdaptiveTone& tone) {
-  auto hist = std::unique_ptr<JpegHistogram>(new (std::nothrow) JpegHistogram());
-  if (!hist) {
-    LOG_DBG("JPG", "Adaptive tone: histogram alloc failed, using identity");
-    return;
-  }
-  memset(hist->bins, 0, sizeof(hist->bins));
-  hist->total = 0;
-
-  if (jpeg.open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegHistogramCallback) != 1) {
-    // Close even on a failed open: jpegOpen() may already have allocated the
-    // FsFile before parsing failed, and close() is what releases it (the main
-    // decode path relies on the same behaviour via its ScopedCleanup).
-    jpeg.close();
-    LOG_DBG("JPG", "Adaptive tone: pre-pass open failed, using identity");
-    return;
-  }
-  jpeg.setPixelType(EIGHT_BIT_GRAYSCALE);
-  jpeg.setUserPointer(hist.get());
-  const unsigned long start = millis();
-  const int rc = jpeg.decode(0, 0, JPEG_SCALE_EIGHTH);
-  const unsigned long elapsed = millis() - start;
-  jpeg.close();
-
-  if (rc != 1) {
-    LOG_DBG("JPG", "Adaptive tone: pre-pass decode failed (rc=%d), using identity", rc);
-    return;
-  }
-
-  const bool applied = tone.buildFromHistogram(hist->bins, hist->total);
-  LOG_DBG("JPG", "Adaptive tone: %s (%u px sampled, %lu ms)", applied ? "enabled" : "skipped (range already wide)",
-          hist->total, elapsed);
-}
-
 int jpegDrawCallback(JPEGDRAW* pDraw) {
   JpegContext* ctx = reinterpret_cast<JpegContext*>(pDraw->pUser);
   if (!ctx || !ctx->config || !ctx->renderer) return 0;
@@ -209,9 +136,6 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   if (stride <= 0 || blockH <= 0 || validW <= 0) return 1;
 
   const bool useDithering = ctx->config->useDithering;
-  // Identity map unless the pre-pass found a narrow-range image, so this can
-  // be indexed unconditionally on the hot path.
-  const uint8_t* tone = ctx->tone.lut;
   bool caching = ctx->caching;
   const int32_t fineScaleFPX = ctx->fineScaleFPX;
   const int32_t invScaleFPX = ctx->invScaleFPX;
@@ -275,10 +199,10 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       const uint8_t* row = &pixels[(dstY - blockY) * stride];
       for (int dstX = dstXStart; dstX < dstXEnd; dstX++) {
         const int outX = cfgX + dstX;
-        uint8_t gray = tone[row[dstX - blockX]];
+        uint8_t gray = row[dstX - blockX];
         uint8_t dithered;
         if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY, ctx->config->cacheVariant);
+          dithered = applyBayerDither4Level(gray, outX, outY);
         } else {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
@@ -333,11 +257,11 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
         int top = ((int)row0[lx0] * fxInv + (int)row0[lx1] * fx) >> FP_SHIFT;
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
-        uint8_t gray = tone[(uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT)];
+        uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
         uint8_t dithered;
         if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY, ctx->config->cacheVariant);
+          dithered = applyBayerDither4Level(gray, outX, outY);
         } else {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
@@ -356,11 +280,11 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
         int top = ((int)row0[lx0] * fxInv + (int)row0[lx0 + 1] * fx) >> FP_SHIFT;
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx0 + 1] * fx) >> FP_SHIFT;
-        uint8_t gray = tone[(uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT)];
+        uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
         uint8_t dithered;
         if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY, ctx->config->cacheVariant);
+          dithered = applyBayerDither4Level(gray, outX, outY);
         } else {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
@@ -382,11 +306,11 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
         int top = ((int)row0[lx0] * fxInv + (int)row0[lx1] * fx) >> FP_SHIFT;
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
-        uint8_t gray = tone[(uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT)];
+        uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
         uint8_t dithered;
         if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY, ctx->config->cacheVariant);
+          dithered = applyBayerDither4Level(gray, outX, outY);
         } else {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
@@ -415,11 +339,11 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       int lx = (srcFxFP >> FP_SHIFT) - blockX;
       if (lx < 0) lx = 0;
       if (lx >= validW) lx = validW - 1;
-      uint8_t gray = tone[row[lx]];
+      uint8_t gray = row[lx];
 
       uint8_t dithered;
       if (useDithering) {
-        dithered = applyBayerDither4Level(gray, outX, outY, ctx->config->cacheVariant);
+        dithered = applyBayerDither4Level(gray, outX, outY);
       } else {
         dithered = gray / 85;
         if (dithered > 3) dithered = 3;
@@ -479,15 +403,6 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   ctx.config = &config;
   ctx.screenWidth = renderer.getScreenWidth();
   ctx.screenHeight = renderer.getScreenHeight();
-
-  // Adaptive tone pre-pass. Gated on cache building: on a cache hit this
-  // function is never reached, so the cost lands once per image. Without a
-  // cache the image is re-decoded on every render pass, and a pre-pass each
-  // time would be far too expensive. Dither-only, since the tone curve exists
-  // to feed 4-level quantization.
-  if (config.cacheVariant == PixelCacheVariant::FactoryLut && config.useDithering && !config.cachePath.empty()) {
-    buildAdaptiveTone(*jpeg, imagePath, ctx.tone);
-  }
 
   int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
   const ScopedCleanup cleanup{[&jpeg]() { jpeg->close(); }};
@@ -566,8 +481,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   ctx.caching = !config.cachePath.empty();
   if (ctx.caching) {
     const int maxBlockDstRows = (int)(((int64_t)16 * ctx.fineScaleFPY) >> FP_SHIFT) + 2;
-    if (!ctx.cache.begin(config.cachePath, destWidth, destHeight, config.x, config.y, maxBlockDstRows,
-                         config.cacheVariant)) {
+    if (!ctx.cache.begin(config.cachePath, destWidth, destHeight, config.x, config.y, maxBlockDstRows)) {
       LOG_ERR("JPG", "Failed to start cache stream, continuing without caching");
       ctx.caching = false;
     }

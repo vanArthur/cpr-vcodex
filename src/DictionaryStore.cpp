@@ -7,7 +7,6 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
-#include <Utf8.h>
 #include <esp_heap_caps.h>
 
 #include <algorithm>
@@ -18,19 +17,8 @@
 
 #include "CrossPointSettings.h"
 #include "DictionaryFontSelection.h"
-#include "util/AtomicFileReplace.h"
 
 namespace {
-using LookupStatus = DictionaryLookupResult::Status;
-
-bool lookupFailure(LookupStatus* error, const LookupStatus status) {
-  if (error) *error = status;
-  return false;
-}
-
-LookupStatus readFailure(HalFile& file) {
-  return file.position() < file.fileSize() ? LookupStatus::IoError : LookupStatus::InvalidDictionary;
-}
 constexpr uint32_t CACHE_MAGIC = 0x44435458;  // DCTX
 constexpr uint8_t NULL_TERMINATED_TYPES[] = {'m', 'l', 'g', 't', 'x', 'y', 'k', 'w', 'h', 'n', 'r'};
 constexpr uint8_t DEFINITION_TEXT_SIZE_CONFIG_VERSION = 4;
@@ -145,30 +133,16 @@ bool parseIfoField(const char* line, const char* key, std::string& out) {
   return true;
 }
 
-std::string readIndexWord(HalFile& file, LookupStatus* error = nullptr) {
-  char word[256];
-  size_t length = 0;
-  while (length < sizeof(word)) {
+std::string readIndexWord(HalFile& file) {
+  std::string word;
+  word.reserve(32);
+  while (true) {
     const int c = file.read();
-    if (c < 0) {
-      lookupFailure(error, readFailure(file));
-      return {};
-    }
-    if (c == 0) {
-      if (length == 0) {
-        lookupFailure(error, LookupStatus::InvalidDictionary);
-        return {};
-      }
-      if (!hasHeapHeadroom(length + 1)) {
-        lookupFailure(error, LookupStatus::OutOfMemory);
-        return {};
-      }
-      return std::string(word, length);
-    }
-    word[length++] = static_cast<char>(c);
+    if (c <= 0) break;
+    word.push_back(static_cast<char>(c));
+    if (word.size() > 255) break;
   }
-  lookupFailure(error, LookupStatus::InvalidDictionary);
-  return {};
+  return word;
 }
 
 int compareWords(const std::string& lhs, const std::string& rhs) {
@@ -830,16 +804,14 @@ void appendTypedField(std::string& out, uint8_t type, const char* data, size_t l
   appendNormalizedField(out, data, len);
 }
 
-std::string decodeStarDictData(const std::string& raw, const std::string& sameTypeSequence, const bool partial,
-                               bool& valid) {
-  valid = true;
+std::string decodeStarDictData(const std::string& raw, const std::string& sameTypeSequence) {
   if (raw.empty()) return "";
   if (!sameTypeSequence.empty()) {
     std::string out;
     size_t pos = 0;
-    for (size_t typeIndex = 0; typeIndex < sameTypeSequence.size(); ++typeIndex) {
+    for (const char typeChar : sameTypeSequence) {
       if (pos >= raw.size()) break;
-      const uint8_t type = static_cast<uint8_t>(sameTypeSequence[typeIndex]);
+      const uint8_t type = static_cast<uint8_t>(typeChar);
       if (isNullTerminatedType(type)) {
         const size_t start = pos;
         while (pos < raw.size() && raw[pos] != '\0') ++pos;
@@ -847,23 +819,10 @@ std::string decodeStarDictData(const std::string& raw, const std::string& sameTy
         if (pos < raw.size() && raw[pos] == '\0') ++pos;
         continue;
       }
-      if (std::isupper(type)) {
-        // In sametypesequence the last field omits its length prefix.
-        if (typeIndex + 1 == sameTypeSequence.size()) {
-          appendTypedField(out, type, raw.data() + pos, raw.size() - pos);
-          pos = raw.size();
-          continue;
-        }
-        if (raw.size() - pos < 4) {
-          valid = partial;
-          break;
-        }
+      if (std::isupper(type) && pos + 4 <= raw.size()) {
         const uint32_t fieldSize = readBE32(reinterpret_cast<const uint8_t*>(raw.data() + pos));
         pos += 4;
-        if (fieldSize > raw.size() - pos) {
-          valid = partial;
-          break;
-        }
+        if (pos + fieldSize > raw.size()) break;
         appendTypedField(out, type, raw.data() + pos, fieldSize);
         pos += fieldSize;
         continue;
@@ -885,17 +844,10 @@ std::string decodeStarDictData(const std::string& raw, const std::string& sameTy
       if (pos < raw.size() && raw[pos] == '\0') ++pos;
       continue;
     }
-    if (std::isupper(type)) {
-      if (raw.size() - pos < 4) {
-        valid = partial;
-        break;
-      }
+    if (std::isupper(type) && pos + 4 <= raw.size()) {
       const uint32_t fieldSize = readBE32(reinterpret_cast<const uint8_t*>(raw.data() + pos));
       pos += 4;
-      if (fieldSize > raw.size() - pos) {
-        valid = partial;
-        break;
-      }
+      if (pos + fieldSize > raw.size()) break;
       appendTypedField(out, type, raw.data() + pos, fieldSize);
       pos += fieldSize;
       continue;
@@ -904,8 +856,7 @@ std::string decodeStarDictData(const std::string& raw, const std::string& sameTy
     if (isDisplayDefinitionType(type)) {
       out.push_back(static_cast<char>(type));
       out.append(raw.data() + pos, raw.size() - pos);
-    } else
-      valid = partial;
+    }
     break;
   }
   return out;
@@ -1048,42 +999,17 @@ DictionaryStore& DictionaryStore::getInstance() {
   return instance;
 }
 
-const char* DictionaryStore::lookupErrorMessage(const LookupStatus status) {
-  switch (status) {
-    case LookupStatus::IoError:
-      return tr(STR_DICTIONARY_IO_ERROR);
-    case LookupStatus::InvalidDictionary:
-      return tr(STR_DICTIONARY_INVALID);
-    case LookupStatus::OutOfMemory:
-      return tr(STR_DICTIONARY_LOW_MEMORY);
-    case LookupStatus::NoDictionary:
-      return tr(STR_DICTIONARY_NONE_SELECTED);
-    case LookupStatus::NotReady:
-      return tr(STR_DICTIONARY_NOT_READY);
-    default:
-      return tr(STR_DEFINITION_NOT_FOUND);
-  }
-}
-
 void DictionaryStore::loadConfig() {
   configLoaded = true;
-  configReadable = true;
   activeIfoPath.clear();
   definitionTextSize = DEF_TEXT_SMALL;
-  AtomicFileReplace::recover(Storage, CONFIG_PATH, "/.crosspoint/dictionary_config.json.bak");
-  const char* backupPath = "/.crosspoint/dictionary_config.json.bak";
-  if (!Storage.exists(CONFIG_PATH) && !Storage.exists(backupPath)) return;
-  JsonDocument doc;
+  if (!Storage.exists(CONFIG_PATH)) return;
+
   const String json = Storage.readFile(CONFIG_PATH);
-  if (json.isEmpty() || deserializeJson(doc, json.c_str()) != DeserializationError::Ok || !doc.is<JsonObject>()) {
-    const String backup = Storage.readFile(backupPath);
-    doc.clear();
-    if (backup.isEmpty() || deserializeJson(doc, backup.c_str()) != DeserializationError::Ok || !doc.is<JsonObject>()) {
-      configReadable = false;
-      LOG_ERR("DICT", "Keeping unreadable dictionary config; automatic saves disabled");
-      return;
-    }
-  }
+  if (json.isEmpty()) return;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return;
   activeIfoPath = doc["activeIfoPath"] | std::string("");
   const int storedSize = doc["definitionTextSize"] | static_cast<int>(definitionTextSize);
   const uint8_t sizeVersion = doc["definitionTextSizeVersion"] | static_cast<uint8_t>(0);
@@ -1099,7 +1025,6 @@ void DictionaryStore::loadConfig() {
 }
 
 bool DictionaryStore::saveConfig() const {
-  if (!configReadable) return false;
   Storage.mkdir("/.crosspoint");
   JsonDocument doc;
   doc["activeIfoPath"] = activeIfoPath;
@@ -1110,15 +1035,16 @@ bool DictionaryStore::saveConfig() const {
 
   HalFile file;
   if (!Storage.openFileForWrite("DICT", tempPath, file)) return false;
-  const size_t expected = measureJson(doc);
-  const size_t written = serializeJson(doc, file);
+  serializeJson(doc, file);
   file.flush();
-  const bool closed = file.close();
-  if (!closed || doc.overflowed() || written != expected || written == 0) {
+  file.close();
+
+  Storage.remove(CONFIG_PATH);
+  if (!Storage.rename(tempPath.c_str(), CONFIG_PATH)) {
     Storage.remove(tempPath.c_str());
     return false;
   }
-  return AtomicFileReplace::promote(Storage, tempPath.c_str(), CONFIG_PATH, "/.crosspoint/dictionary_config.json.bak");
+  return true;
 }
 
 void DictionaryStore::clearActiveOnlyEntry() {
@@ -1300,17 +1226,10 @@ bool DictionaryStore::setActiveIndex(const int index) {
   if (!scanned) scan();
   if (index < 0 || index >= static_cast<int>(entries.size())) return false;
   if (entries[index].compressed || entries[index].missingFiles) return false;
-  const int previousIndex = activeIndex;
-  const std::string previousPath = activeIfoPath;
   activeIndex = index;
   activeIfoPath = entries[index].ifoPath;
-  if (!saveConfig()) {
-    activeIndex = previousIndex;
-    activeIfoPath = previousPath;
-    return false;
-  }
   clearActiveOnlyEntry();
-  return true;
+  return saveConfig();
 }
 
 std::string DictionaryStore::getActiveLabel() const {
@@ -1321,11 +1240,8 @@ std::string DictionaryStore::getActiveLabel() const {
 
 bool DictionaryStore::setDefinitionTextSize(const uint8_t size) {
   if (size >= DEF_TEXT_SIZE_COUNT) return false;
-  const uint8_t previousSize = definitionTextSize;
   definitionTextSize = size;
-  if (saveConfig()) return true;
-  definitionTextSize = previousSize;
-  return false;
+  return saveConfig();
 }
 
 int DictionaryStore::getDefinitionFontId(const int readerFontId) const {
@@ -1430,18 +1346,7 @@ bool DictionaryStore::loadCheckpointCache(DictionaryEntry& entry) {
     entry.ordinals.push_back(readU32(buf));
   }
   file.close();
-  bool valid = entry.totalWords > 0 && entry.checkpoints.front() == 0 && entry.ordinals.front() == 0;
-  for (size_t i = 0; valid && i < entry.checkpoints.size(); ++i) {
-    valid = entry.checkpoints[i] < entry.idxFileSize && entry.ordinals[i] < entry.totalWords;
-    if (i > 0)
-      valid = valid && entry.checkpoints[i] > entry.checkpoints[i - 1] && entry.ordinals[i] > entry.ordinals[i - 1];
-  }
-  if (!valid) {
-    entry.checkpoints.clear();
-    entry.ordinals.clear();
-    entry.totalWords = 0;
-  }
-  return valid;
+  return entry.checkpoints.size() == entry.ordinals.size();
 }
 
 bool DictionaryStore::saveCheckpointCache(const DictionaryEntry& entry) const {
@@ -1491,18 +1396,13 @@ bool DictionaryStore::saveCheckpointCache(const DictionaryEntry& entry) const {
   return true;
 }
 
-bool DictionaryStore::ensurePrepared(DictionaryEntry& entry, const std::function<void(int percent)>& onProgress,
-                                     LookupStatus* error) {
-  if (entry.compressed) return lookupFailure(error, LookupStatus::NotReady);
-  if (entry.missingFiles) return lookupFailure(error, LookupStatus::IoError);
+bool DictionaryStore::ensurePrepared(DictionaryEntry& entry, const std::function<void(int percent)>& onProgress) {
+  if (entry.compressed || entry.missingFiles) return false;
   if (!entry.checkpoints.empty() && !entry.ordinals.empty()) return true;
   if (loadCheckpointCache(entry)) return true;
 
   HalFile idx;
-  if (!Storage.openFileForRead("DICT", entry.idxPath, idx)) return lookupFailure(error, LookupStatus::IoError);
-  if (idx.fileSize() == 0 || idx.fileSize() > UINT32_MAX) {
-    return lookupFailure(error, LookupStatus::InvalidDictionary);
-  }
+  if (!Storage.openFileForRead("DICT", entry.idxPath, idx)) return false;
   entry.idxFileSize = static_cast<uint32_t>(idx.fileSize());
   entry.checkpoints.clear();
   entry.ordinals.clear();
@@ -1541,21 +1441,24 @@ bool DictionaryStore::ensurePrepared(DictionaryEntry& entry, const std::function
         entry.checkpoints.clear();
         entry.ordinals.clear();
         entry.totalWords = 0;
-        return lookupFailure(error, LookupStatus::OutOfMemory);
+        return false;
       }
     }
 
-    LookupStatus readStatus = LookupStatus::NotFound;
-    const std::string key = readIndexWord(idx, &readStatus);
+    int c = 0;
+    do {
+      c = idx.read();
+      if (c < 0) {
+        pos = entry.idxFileSize;
+        break;
+      }
+      ++pos;
+    } while (c != 0);
+    if (pos >= entry.idxFileSize) break;
+
     uint8_t skip[8];
-    if (key.empty() || idx.read(skip, sizeof(skip)) != static_cast<int>(sizeof(skip))) {
-      if (!key.empty()) readStatus = readFailure(idx);
-      entry.checkpoints.clear();
-      entry.ordinals.clear();
-      entry.totalWords = 0;
-      return lookupFailure(error, readStatus);
-    }
-    pos = static_cast<uint32_t>(idx.position());
+    if (idx.read(skip, sizeof(skip)) != static_cast<int>(sizeof(skip))) break;
+    pos += sizeof(skip);
     ++entry.totalWords;
 
     if (onProgress && entry.idxFileSize > 0) {
@@ -1568,26 +1471,23 @@ bool DictionaryStore::ensurePrepared(DictionaryEntry& entry, const std::function
   }
   idx.close();
 
-  if (entry.checkpoints.empty() || entry.totalWords == 0) return lookupFailure(error, LookupStatus::InvalidDictionary);
+  if (entry.checkpoints.empty()) return false;
   saveCheckpointCache(entry);
   return true;
 }
 
-bool DictionaryStore::findIndexHit(const DictionaryEntry& entry, const std::string& word, IndexHit& hit,
-                                   LookupStatus* error) const {
-  if (entry.checkpoints.empty() || entry.checkpoints.size() != entry.ordinals.size())
-    return lookupFailure(error, LookupStatus::InvalidDictionary);
+bool DictionaryStore::findIndexHit(const DictionaryEntry& entry, const std::string& word, IndexHit& hit) const {
+  if (entry.checkpoints.empty()) return false;
 
   HalFile idx;
-  if (!Storage.openFileForRead("DICT", entry.idxPath, idx)) return lookupFailure(error, LookupStatus::IoError);
+  if (!Storage.openFileForRead("DICT", entry.idxPath, idx)) return false;
 
   int lo = 0;
   int hi = static_cast<int>(entry.checkpoints.size()) - 1;
   while (lo < hi) {
     const int mid = lo + (hi - lo + 1) / 2;
-    if (!idx.seekSet(entry.checkpoints[mid])) return lookupFailure(error, LookupStatus::IoError);
-    const std::string key = readIndexWord(idx, error);
-    if (key.empty()) return false;
+    if (!idx.seekSet(entry.checkpoints[mid])) break;
+    const std::string key = readIndexWord(idx);
     if (compareWords(key, word) <= 0) {
       lo = mid;
     } else {
@@ -1597,7 +1497,7 @@ bool DictionaryStore::findIndexHit(const DictionaryEntry& entry, const std::stri
 
   if (!idx.seekSet(entry.checkpoints[lo])) {
     idx.close();
-    return lookupFailure(error, LookupStatus::IoError);
+    return false;
   }
 
   uint32_t maxEntries = CHECKPOINT_INTERVAL;
@@ -1608,10 +1508,10 @@ bool DictionaryStore::findIndexHit(const DictionaryEntry& entry, const std::stri
   }
 
   for (uint32_t i = 0; i < maxEntries; ++i) {
-    const std::string key = readIndexWord(idx, error);
-    if (key.empty()) return false;
+    const std::string key = readIndexWord(idx);
+    if (key.empty()) break;
     uint8_t buf[8];
-    if (idx.read(buf, sizeof(buf)) != static_cast<int>(sizeof(buf))) return lookupFailure(error, readFailure(idx));
+    if (idx.read(buf, sizeof(buf)) != static_cast<int>(sizeof(buf))) break;
     const int cmp = compareWords(key, word);
     if (cmp == 0) {
       hit.headword = key;
@@ -1627,12 +1527,8 @@ bool DictionaryStore::findIndexHit(const DictionaryEntry& entry, const std::stri
   return false;
 }
 
-std::string DictionaryStore::headwordAtOrdinal(const DictionaryEntry& entry, uint32_t ordinal,
-                                               LookupStatus* error) const {
-  if (entry.checkpoints.empty() || entry.checkpoints.size() != entry.ordinals.size() || ordinal >= entry.totalWords) {
-    lookupFailure(error, LookupStatus::InvalidDictionary);
-    return {};
-  }
+std::string DictionaryStore::headwordAtOrdinal(const DictionaryEntry& entry, uint32_t ordinal) const {
+  if (entry.checkpoints.empty() || entry.checkpoints.size() != entry.ordinals.size()) return "";
   size_t lo = 0;
   size_t hi = entry.ordinals.size();
   while (lo + 1 < hi) {
@@ -1645,35 +1541,32 @@ std::string DictionaryStore::headwordAtOrdinal(const DictionaryEntry& entry, uin
   }
 
   HalFile idx;
-  if (!Storage.openFileForRead("DICT", entry.idxPath, idx)) {
-    lookupFailure(error, LookupStatus::IoError);
-    return {};
-  }
+  if (!Storage.openFileForRead("DICT", entry.idxPath, idx)) return "";
   if (!idx.seekSet(entry.checkpoints[lo])) {
-    lookupFailure(error, LookupStatus::IoError);
-    return {};
+    idx.close();
+    return "";
   }
 
   const uint32_t skipCount = ordinal - entry.ordinals[lo];
   uint8_t skip[8];
   for (uint32_t i = 0; i < skipCount; ++i) {
-    if (readIndexWord(idx, error).empty()) return {};
+    readIndexWord(idx);
     if (idx.read(skip, sizeof(skip)) != static_cast<int>(sizeof(skip))) {
-      lookupFailure(error, readFailure(idx));
-      return {};
+      idx.close();
+      return "";
     }
   }
 
-  const std::string headword = readIndexWord(idx, error);
+  const std::string headword = readIndexWord(idx);
   idx.close();
   return headword;
 }
 
-bool DictionaryStore::lookupSynonym(const DictionaryEntry& entry, const std::string& word, std::string& canonical,
-                                    LookupStatus* error) const {
+bool DictionaryStore::lookupSynonym(const DictionaryEntry& entry, const std::string& word,
+                                    std::string& canonical) const {
   if (entry.synPath.empty()) return false;
   HalFile syn;
-  if (!Storage.openFileForRead("DICT", entry.synPath, syn)) return lookupFailure(error, LookupStatus::IoError);
+  if (!Storage.openFileForRead("DICT", entry.synPath, syn)) return false;
 
   const size_t fileSize = syn.fileSize();
   size_t lo = 0;
@@ -1684,15 +1577,15 @@ bool DictionaryStore::lookupSynonym(const DictionaryEntry& entry, const std::str
   while (hi > lo && hi - lo > 1024) {
     const size_t mid = lo + (hi - lo) / 2;
     const size_t scanFrom = mid > 260 ? mid - 260 : 0;
-    if (!syn.seekSet(scanFrom)) return lookupFailure(error, LookupStatus::IoError);
+    if (!syn.seekSet(scanFrom)) break;
 
     int guard = 260;
     while (guard-- > 0) {
       const int c = syn.read();
-      if (c < 0) return lookupFailure(error, readFailure(syn));
+      if (c < 0) goto linearSyn;
       if (c == 0) break;
     }
-    if (!syn.seekCur(4)) return lookupFailure(error, LookupStatus::IoError);
+    if (!syn.seekCur(4)) break;
 
     const size_t entryStart = syn.position();
     if (entryStart >= hi) {
@@ -1720,13 +1613,14 @@ bool DictionaryStore::lookupSynonym(const DictionaryEntry& entry, const std::str
 linearSyn:
   if (!found) {
     if (!syn.seekSet(lo)) {
-      return lookupFailure(error, LookupStatus::IoError);
+      syn.close();
+      return false;
     }
     while (syn.position() < hi) {
-      const std::string key = readIndexWord(syn, error);
-      if (key.empty()) return false;
+      const std::string key = readIndexWord(syn);
+      if (key.empty() && syn.position() >= hi) break;
       uint8_t raw[4];
-      if (syn.read(raw, 4) != 4) return lookupFailure(error, readFailure(syn));
+      if (syn.read(raw, 4) != 4) break;
       const int cmp = compareWords(key, word);
       if (cmp == 0) {
         ordinal = readBE32(raw);
@@ -1738,46 +1632,29 @@ linearSyn:
 
   syn.close();
   if (!found) return false;
-  canonical = headwordAtOrdinal(entry, ordinal, error);
+  canonical = headwordAtOrdinal(entry, ordinal);
   return !canonical.empty();
 }
 
-std::string DictionaryStore::readDefinition(const DictionaryEntry& entry, const IndexHit& hit, bool& truncated,
-                                            LookupStatus& status) const {
-  status = LookupStatus::InvalidDictionary;
-  if (hit.dictSize == 0) return {};
+std::string DictionaryStore::readDefinition(const DictionaryEntry& entry, const IndexHit& hit, bool& truncated) const {
   const size_t readBytes = safeDefinitionReadBytes(hit.dictSize);
   truncated = readBytes == 0 || hit.dictSize > readBytes;
-  if (readBytes == 0) {
-    status = LookupStatus::OutOfMemory;
-    return {};
-  }
+  if (readBytes == 0) return "";
 
   HalFile dict;
-  if (!Storage.openFileForRead("DICT", entry.dictPath, dict)) {
-    status = LookupStatus::IoError;
-    return {};
-  }
-  // Validate the complete entry, including a tail omitted by the display cap.
-  // Subtraction avoids overflow when a malformed index supplies large offsets.
-  const uint64_t fileSize = dict.fileSize();
-  if (hit.dictOffset > fileSize || hit.dictSize > fileSize - hit.dictOffset) return {};
+  if (!Storage.openFileForRead("DICT", entry.dictPath, dict)) return "";
   if (!dict.seekSet(hit.dictOffset)) {
-    status = LookupStatus::IoError;
-    return {};
+    dict.close();
+    return "";
   }
 
   std::string raw(readBytes, '\0');
   const int bytesRead = dict.read(raw.data(), readBytes);
   dict.close();
-  if (bytesRead != static_cast<int>(readBytes)) {
-    status = LookupStatus::IoError;
-    return {};
-  }
+  if (bytesRead <= 0) return "";
+  raw.resize(static_cast<size_t>(bytesRead));
 
-  bool valid = true;
-  std::string decoded = decodeStarDictData(raw, entry.sameTypeSequence, truncated, valid);
-  if (!valid) return {};
+  std::string decoded = decodeStarDictData(raw, entry.sameTypeSequence);
   raw.clear();
   std::string().swap(raw);
   if (decoded.size() > MAX_DEFINITION_BYTES) {
@@ -1785,17 +1662,7 @@ std::string DictionaryStore::readDefinition(const DictionaryEntry& entry, const 
     while (!decoded.empty() && (static_cast<unsigned char>(decoded.back()) & 0xC0) == 0x80) decoded.pop_back();
     truncated = true;
   }
-  std::string definition = stripHtmlAndEntities(decoded);
-  if (definition.size() > MAX_DEFINITION_BYTES) {
-    definition.resize(MAX_DEFINITION_BYTES);
-    truncated = true;
-  }
-  if (truncated) {
-    definition.resize(
-        static_cast<size_t>(utf8SafeTruncateBuffer(definition.data(), static_cast<int>(definition.size()))));
-  }
-  if (!definition.empty()) status = LookupStatus::Found;
-  return definition;
+  return stripHtmlAndEntities(decoded);
 }
 
 std::vector<std::string> DictionaryStore::getFallbackForms(const DictionaryEntry& entry,
@@ -1880,47 +1747,39 @@ DictionaryLookupResult DictionaryStore::lookup(const std::string& rawWord, const
   }
   result.dictionaryName = entry->name;
 
-  if (!ensurePrepared(*entry, nullptr, &result.status)) {
+  if (!ensurePrepared(*entry)) {
+    result.status = DictionaryLookupResult::Status::NotReady;
     return result;
   }
 
   auto finishFound = [&](const IndexHit& hit) {
+    result.status = DictionaryLookupResult::Status::Found;
     result.headword = hit.headword;
-    result.definition = readDefinition(*entry, hit, result.truncated, result.status);
-    if (result.status == LookupStatus::Found) {
-      addHistory(result.headword.empty() ? result.query : result.headword);
-    }
+    result.definition = readDefinition(*entry, hit, result.truncated);
+    addHistory(result.headword.empty() ? result.query : result.headword);
   };
 
   IndexHit hit;
-  if (findIndexHit(*entry, result.query, hit, &result.status)) {
+  if (findIndexHit(*entry, result.query, hit)) {
     finishFound(hit);
     return result;
   }
-
-  if (result.status != LookupStatus::NotFound) return result;
 
   std::string canonical;
-  if (lookupSynonym(*entry, result.query, canonical, &result.status) &&
-      findIndexHit(*entry, canonical, hit, &result.status)) {
+  if (lookupSynonym(*entry, result.query, canonical) && findIndexHit(*entry, canonical, hit)) {
     finishFound(hit);
     return result;
   }
 
-  if (result.status != LookupStatus::NotFound) return result;
-
   for (const std::string& fallback : getFallbackForms(*entry, result.query)) {
-    if (findIndexHit(*entry, fallback, hit, &result.status)) {
+    if (findIndexHit(*entry, fallback, hit)) {
       finishFound(hit);
       return result;
     }
-    if (result.status != LookupStatus::NotFound) return result;
-    if (lookupSynonym(*entry, fallback, canonical, &result.status) &&
-        findIndexHit(*entry, canonical, hit, &result.status)) {
+    if (lookupSynonym(*entry, fallback, canonical) && findIndexHit(*entry, canonical, hit)) {
       finishFound(hit);
       return result;
     }
-    if (result.status != LookupStatus::NotFound) return result;
   }
 
   result.status = DictionaryLookupResult::Status::NotFound;
@@ -2078,21 +1937,13 @@ std::string DictionaryStore::cleanWord(const std::string& word) {
 
 std::vector<std::string> DictionaryStore::getHistory() {
   std::vector<std::string> history;
-  historyReadable = true;
-  AtomicFileReplace::recover(Storage, HISTORY_PATH, "/.crosspoint/dictionary_history.txt.bak");
   HalFile file;
-  if (!Storage.openFileForRead("DICT", HISTORY_PATH, file)) {
-    historyReadable = !Storage.exists(HISTORY_PATH) && !Storage.exists("/.crosspoint/dictionary_history.txt.bak");
-    return history;
-  }
+  if (!Storage.openFileForRead("DICT", HISTORY_PATH, file)) return history;
 
   std::string line;
   while (true) {
     const int c = file.read();
-    if (c < 0) {
-      if (file.position() < file.fileSize()) historyReadable = false;
-      break;
-    }
+    if (c < 0) break;
     if (c == '\r') continue;
     if (c == '\n') {
       if (!line.empty()) {
@@ -2114,10 +1965,6 @@ void DictionaryStore::addHistory(const std::string& word) {
   if (cleaned.empty()) return;
 
   auto history = getHistory();
-  if (!historyReadable) {
-    LOG_ERR("DICT", "Keeping unreadable dictionary history; update skipped");
-    return;
-  }
   history.erase(std::remove(history.begin(), history.end(), cleaned), history.end());
   history.insert(history.begin(), cleaned);
   if (history.size() > MAX_HISTORY_ITEMS) history.resize(MAX_HISTORY_ITEMS);
@@ -2127,25 +1974,16 @@ void DictionaryStore::addHistory(const std::string& word) {
   Storage.remove(tempPath.c_str());
   HalFile file;
   if (!Storage.openFileForWrite("DICT", tempPath, file)) return;
-  bool complete = true;
   for (const std::string& item : history) {
-    if (file.write(item.c_str(), item.size()) != item.size() || file.write(static_cast<uint8_t>('\n')) != 1) {
-      complete = false;
-      break;
-    }
+    file.write(item.c_str(), item.size());
+    file.write(static_cast<uint8_t>('\n'));
   }
   file.flush();
-  const bool closed = file.close();
-  if (!closed || !complete) {
+  file.close();
+  Storage.remove(HISTORY_PATH);
+  if (!Storage.rename(tempPath.c_str(), HISTORY_PATH)) {
     Storage.remove(tempPath.c_str());
-    return;
   }
-  AtomicFileReplace::promote(Storage, tempPath.c_str(), HISTORY_PATH, "/.crosspoint/dictionary_history.txt.bak");
 }
 
-void DictionaryStore::clearHistory() {
-  // Explicit deletion must also remove recovery copies to avoid resurrecting it.
-  Storage.remove("/.crosspoint/dictionary_history.txt.bak");
-  Storage.remove("/.crosspoint/dictionary_history.txt.tmp");
-  Storage.remove(HISTORY_PATH);
-}
+void DictionaryStore::clearHistory() { Storage.remove(HISTORY_PATH); }
