@@ -50,19 +50,93 @@ The philosophy of this fork is simple: keep the firmware fast, stable, and focus
 | Item | Value |
 |---|---|
 | Project | `CPR-vCodex` |
-| Device | `Xteink X4` (personally tested); `Xteink X3` UC8253/UC8279d runtime support, with broader physical feedback requested. **X4 Pro firmware distribution is withdrawn** because locked devices do not have a confirmed recovery path. |
-| Current release (CPR-vCodex) build | [`1.6.0.32-cpr-vcodex`](https://github.com/franssjz/cpr-vcodex/releases/tag/1.6.0.32-cpr-vcodex) |
-| Release hardware stack | `freeink-sdk` [`cb9167d5`](https://github.com/Free-Ink/freeink-sdk/commit/cb9167d541c0f6e9d57cf8eae1f564a939883ecc), with runtime X3/X4 panel detection. |
+| Device | `Xteink X4` original (ESP32-C3, personally tested); `Xteink X3` UC8253/UC8279d runtime support, with physical validation of this integration pending. **Not for X4 Classic/X4C (ESP32-S3). X4 Pro firmware distribution remains withdrawn.** |
+| Current release (CPR-vCodex) build | [`1.6.5.3-cpr-vcodex`](https://github.com/franssjz/cpr-vcodex/releases/tag/1.6.5.3-cpr-vcodex) |
+| Release hardware stack | `freeink-sdk` [`9729236c`](https://github.com/Free-Ink/freeink-sdk/commit/9729236ce7b730b81b8fcceec4aa77051b6dfae3), with runtime X3/X4 panel detection. |
 | Latest SD font package | [`sd-fonts-m1-b4`](https://github.com/franssjz/cpr-vcodex/releases/tag/sd-fonts-m1-b4) |
 | Changelog | [CHANGELOG.md](./CHANGELOG.md) |
-| Current release sync | CrossPoint Reader `develop` [`233f93ff`](https://github.com/crosspoint-reader/crosspoint-reader/commit/233f93ff), including the FreeInkUI activity/input architecture and complete X4 Pro support, merged while retaining CPR-vCodex settings, statistics, bookmarks/highlights, dictionaries, themes, SD fonts, and release tooling. |
-| Current release focus | Safety withdrawal of X4 Pro distribution plus image-tone and list-navigation fixes for the X4/X3 release. |
-| Latest release notes | - Withdraws every X4 Pro release/Auto Flash path after [#212](https://github.com/franssjz/cpr-vcodex/issues/212), because USB-locked units have no confirmed recovery route.<br>- Preserves shadow and midtone detail in four-level EPUB images ([#215](https://github.com/franssjz/cpr-vcodex/issues/215)).<br>- Makes one long press advance exactly one Library page ([#214](https://github.com/franssjz/cpr-vcodex/issues/214)).<br>- Keeps X4 as the Auto Flash default on every visit. |
-| Base firmware line | `CrossPoint Reader 1.6.0` (upstream `develop` [`233f93ff`](https://github.com/crosspoint-reader/crosspoint-reader/commit/233f93ff)) |
-| Latest official commit reviewed | `develop` through [`233f93ff`](https://github.com/crosspoint-reader/crosspoint-reader/commit/233f93ff) |
-| Latest official commit incorporated | Release `1.6.0.31` adopted the FreeInkUI integration from [PR #206](https://github.com/franssjz/cpr-vcodex/pull/206), including freeink-sdk [`cb9167d5`](https://github.com/Free-Ink/freeink-sdk/commit/cb9167d541c0f6e9d57cf8eae1f564a939883ecc); X4 Pro distribution is now withdrawn. |
+| Current release sync | CrossPoint Reader `develop` [`28971493`](https://github.com/crosspoint-reader/crosspoint-reader/commit/28971493dcc2b32804601785a31960a740351f2b), checked on 2026-10-07; preserves the fork's statistics, Sync Day, highlights, dictionaries, flashcards, themes and release tooling. |
+| Current work | Validate real OTA/SD updates, panel variants, sleep/wake and recovery on X3/X4. [Audit and validation status](agent-docs/stability-audit-2026-09.md). |
+| Release validation | All 719 native tests pass, including highlight navigation, KOReader diagnostics, one-time recovery and font restoration. Simulator checks cover lists with 256 highlights and 17 KOReader settings/network cases. Physical validation of 1.6.5.3, real-device TLS recovery, end-to-end OTA and X3 validation remain pending. [Results and limits](agent-docs/issues-221-222-227-2026-10.md). |
+| Base firmware line | CPR-vCodex `1.6.5`, incorporating upstream `develop` through [`28971493`](https://github.com/crosspoint-reader/crosspoint-reader/commit/28971493dcc2b32804601785a31960a740351f2b). |
+| Latest references reviewed | CrossPoint [`aa994cf7`](https://github.com/crosspoint-reader/crosspoint-reader/commit/aa994cf7bf8fb3fd0e08c7c264ae1802c818ab86), its allocation checks in [`3555ff55`](https://github.com/crosspoint-reader/crosspoint-reader/commit/3555ff5569754933be2e0839a583748b42dbe941), and CrossInk [`7a092e88`](https://github.com/uxjulia/CrossInk/commit/7a092e8822c9c90e8beecacd317acc13d3e24dfb). Selected changes and exclusions are recorded in the stability audit. |
+| Latest official commit incorporated | [`28971493`](https://github.com/crosspoint-reader/crosspoint-reader/commit/28971493dcc2b32804601785a31960a740351f2b), with FreeInk SDK `9729236c`. See [integration decisions](agent-docs/upstream-sync.md). |
 | Intentional upstream exclusions | Additional upstream device/theme variants remain outside the supported CPR-vCodex release targets unless explicitly documented. |
 | Firmware targets | `default`/`gh_release` build the ESP32-C3 binary shared by X4 and X3 (runtime panel detection). Tags publish only `<tag>.bin`; X4 Pro release assets, OTA entries, and browser flashing are blocked. |
+
+## What's new in 1.6.5.3
+
+- Large Highlights lists scroll more efficiently, including Korean text using
+  SD-card fonts. Short presses stay single steps even when rendering is slow;
+  holding a button still moves through the list.
+- KOReader registration, authentication and manual sync can restart once into
+  a fresh network session when there is too little contiguous memory before
+  sending a request. The saved profile, book position and reader font are
+  preserved; a failed request with an uncertain server outcome is not replayed
+  through this recovery path.
+- KOReader connection errors show the available ESP/TLS details and the actual
+  server instead of a misleading `HTTP -1`. Certificate verification remains
+  enabled.
+- KOReader settings show the effective server URL. An empty URL continues to
+  use `https://sync.koreader.rocks:443`; the guide now matches this behavior.
+
+These changes address the demonstrated failure paths in
+[#221](https://github.com/franssjz/cpr-vcodex/issues/221),
+[#222](https://github.com/franssjz/cpr-vcodex/issues/222) and
+[#227](https://github.com/franssjz/cpr-vcodex/issues/227). The separate error
+reported for older highlights still needs reproduction details. Real-device
+KOReader recovery, locked-X3 OTA compatibility and the reported SD-card
+mounting failure remain unconfirmed.
+
+> [!IMPORTANT]
+> Use only the shared ESP32-C3 BIN for the original X4 or X3. Do not use it on
+> X4 Classic/X4C or X4 Pro. Physical OTA/SD validation of this integration on
+> X3 remains pending. Keep a backup and a known recovery path; passing tests
+> or an OTA `VALID` flag does not guarantee recovery from every boot failure.
+> Existing books, settings and reading data do not require a factory reset.
+
+See [the release changes](CHANGELOG.md) and the [validation audit](agent-docs/stability-audit-2026-09.md).
+
+## EPUB images fixed since 1.6.0.38
+
+EPUB diagrams and gray backgrounds now retain their gray levels when text
+anti-aliasing is disabled ([#215](https://github.com/franssjz/cpr-vcodex/issues/215)).
+Progressive JPEGs with separate component scans are also corrected using
+CrossPoint's #2925 fix. Existing image caches and settings remain valid.
+The image changes passed simulator regressions and tests against the actual
+JPEG decoder. The development build booted twice on X4; the two reported
+EPUBs still need visual confirmation on the physical screen.
+
+## OTA shows 0 B / 0% — recovery status
+
+CPR-vCodex 1.6.0.31 through 1.6.0.33 can find a new release but fail before
+receiving firmware bytes ([#219](https://github.com/franssjz/cpr-vcodex/issues/219)).
+Version 1.6.0.37 still had a separate update-check failure: on X4, HTTPS
+certificate signature verification could run out of memory while Settings
+remained on the activity stack. Version 1.6.0.38 adapts CrossInk's fresh network
+boot: opening Update briefly shows Loading, then opens the updater with a clean
+heap and without SD reader fonts. It retains certificate verification.
+A successful check shows the installed and published versions;
+an equal or newer installed version is reported as up to date. A failed network
+or manifest check is reported separately and can be retried. The updater also
+retries the certificate-verified manifest through GitHub's raw host if Pages fails.
+
+An installed updater cannot acquire a client-side fix through a download path
+that consistently fails on that device. For an affected reader, the existing
+alternative is to upload the published X3/X4 release BIN using
+`File Transfer > Join Network`, then install it with
+`Settings > System > SD Card Firmware Update`. Use the exact C3 release asset
+and keep the reader powered throughout validation and installation. This path
+does not require USB flashing or removing the microSD card.
+
+Do not substitute an X4 Pro binary. X4 Pro distribution remains withdrawn.
+Keep `/.crosspoint` (settings, progress and statistics) intact. A general
+factory reset or downgrade is not the remedy for this transport failure.
+
+The repaired updater obtains the expected SHA-256 over certificate-verified
+HTTPS and checks the downloaded size, digest, chip and image before selecting
+the inactive OTA partition. Automated fault-injection tests verify activation
+policy; they do not replace an end-to-end transfer and reboot on X3 and X4.
 
 ## Froze in Update Complete (Soft Bricked?) — X3 recovery
 
@@ -558,7 +632,7 @@ Important artifacts include:
 
 ### Recovering Reading Stats after 1.5.0.1 or 1.5.0.2
 
-Update to `1.6.0.32-cpr-vcodex` before resetting or deleting any data. In most cases the existing `/.crosspoint/reading_stats.json` will load automatically after the update because the affected releases rejected the file without overwriting it.
+Update to `1.6.5.3-cpr-vcodex` before resetting or deleting any data. In most cases the existing `/.crosspoint/reading_stats.json` will load automatically after the update because the affected releases rejected the file without overwriting it.
 
 If the displayed totals are still incomplete or incorrect, open `Settings > Apps > Reading Stats > Import Reading Stats` and select the newest suitable dated backup under `/exports/stats_backup_YYYY-MM-DD`. Those weekly backups appear directly in the import list and do not need to be renamed. If the only copy is on a computer, place it on the SD card as exactly `/exports/stats_exported` (without a `.json` extension), then import it. Try older dated backups newest-first if necessary, and preserve a copy of the SD card before cleaning or resetting statistics.
 
@@ -570,8 +644,8 @@ Each packaged dev build now keeps the base firmware line and the local flash ide
 
 Practical values to look at:
 
-- base firmware line: `CrossPoint Reader 1.6.0`
-- current release build style: `1.6.0.32-cpr-vcodex`
+- base firmware line: `CPR-vCodex 1.6.5` (CrossPoint develop integration)
+- current release build style: `1.6.5.3-cpr-vcodex`
 - packaged artifact style: `artifacts/<version>-cpr-vcodex.bin`
 
 The incremental `.bNNNN` suffix exists specifically to help distinguish newer flashes from older ones on real hardware.
@@ -644,8 +718,8 @@ artifacts/<version>-cpr-vcodex.bin
 
 Versioning rules:
 
-- release builds: `1.6.0.<release>-cpr-vcodex.bin`
-- dev builds: `1.6.0.<release>.dev<build>-<sha>-cpr-vcodex.bin`
+- release builds: `1.6.5.<release>-cpr-vcodex.bin`
+- dev builds: `1.6.5.<release>.dev<build>-<sha>-cpr-vcodex.bin`
 - internal maintainer-only X4 Pro builds carry `-x4pro`; these artifacts must
   not be distributed while the safety withdrawal remains active
 
@@ -654,10 +728,10 @@ Release publishing:
 - before tagging, run:
 
 ```powershell
-python scripts/pre_release_check.py --tag 1.6.0.32-cpr-vcodex
+python scripts/pre_release_check.py --tag 1.6.5.3-cpr-vcodex
 ```
 
-- push a stable tag named like `1.6.0.32-cpr-vcodex`
+- push a stable tag named like `1.6.5.3-cpr-vcodex`
 - `pre_release_check.py` dry-runs `gh_release`, checks it against the 6,553,600
   byte X4 OTA slot, validates the artifact pair, and rejects any X4 Pro entry
   or stale X4 Pro browser binary

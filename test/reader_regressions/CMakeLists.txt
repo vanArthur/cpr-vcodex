@@ -1,13 +1,16 @@
 add_executable(reader_regressions_test
   BookmarkStoreTest.cpp
   DictionaryFontSelectionTest.cpp
+  DitherAllocationTest.cpp
   FsHelpersCaseTest.cpp
   HighlightTextMatcherTest.cpp
+  ImageCacheFormatTest.cpp
   ImageDitherTest.cpp
   ImageSafetyTest.cpp
   ReadingSessionLogTest.cpp
   RubyCjkLayoutTest.cpp
   TextBlockSerializationTest.cpp
+  TextSettingsPreviewKeyTest.cpp
   TokenBoundaryTest.cpp
   ${REPO_ROOT}/lib/Epub/Epub/blocks/TextBlock.cpp
   ${REPO_ROOT}/lib/Epub/Epub/converters/ImageDimsProbe.cpp

@@ -291,8 +291,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
           if (useDithering) {
             ditheredGray = applyBayerDither4Level(gray, outX, outY);
           } else {
-            ditheredGray = gray / 85;
-            if (ditheredGray > 3) ditheredGray = 3;
+            ditheredGray = gray >> 6;
           }
           pw.writePixel(outX, ditheredGray, ctx->alphaLineBuffer != nullptr);
           if (caching) cw.writePixel(outX, ditheredGray);
@@ -451,7 +450,7 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   // re-decode on every one of an image page's ~14 render passes.
   ctx.caching = !config.preserveAlpha && !config.cachePath.empty();
   if (ctx.caching) {
-    if (!ctx.cache.begin(config.cachePath, ctx.dstWidth, ctx.dstHeight, config.x, config.y, 1)) {
+    if (!ctx.cache.begin(config.cachePath, ctx.dstWidth, ctx.dstHeight, config.x, config.y, 1, config.cacheVariant)) {
       LOG_ERR("PNG", "Failed to start cache stream, continuing without caching");
       ctx.caching = false;
     }

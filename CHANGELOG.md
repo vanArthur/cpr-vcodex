@@ -1,5 +1,167 @@
 # Changelog
 
+## 1.6.5.3 - Highlights navigation and KOReader recovery (2026-10-15)
+
+- Improve large Highlights lists (#227) with a bounded label window and
+  batched SD-font glyph loading, including a per-row fallback for dense CJK
+  text. Keep the selected row visible when scrolling across supported themes.
+- Preserve short button presses across slow rendering: sample held time with
+  the input event and prevent release edges from becoming page jumps. Keep
+  intentional hold-to-page navigation.
+- Capture KOReader ESP/TLS failure details before connection cleanup and
+  distinguish a missing HTTP response from an actual HTTP status (#221).
+  Show the attempted server origin without credentials or URL query data.
+- Recover once from a rejected TLS memory preflight for KOReader registration,
+  authentication and manual sync (#222). Restart directly into the saved
+  operation without loading reader fonts first, validate the profile identity,
+  and preserve the pending book position. Do not enter a restart loop or
+  replay registration after a request whose result is uncertain. Automatic
+  sync does not use this restart path.
+- Restore the configured SD reader font after a recovery boot. Keep TLS
+  certificate verification and the existing contiguous-memory guard.
+- Show the effective server URL in KOReader settings and profile editing;
+  correct the guide's default to `https://sync.koreader.rocks:443` without
+  changing existing profiles or the firmware default.
+- Pass all 719 native tests and simulator cases for 256 highlights, effective
+  URLs, profile selection, loopback requests and recovery guards, including
+  17 KOReader settings/network checks.
+  Physical X3/X4 TLS and restart validation remains pending. The separate
+  older-highlight error in #227 still needs reproduction details; no fix is
+  claimed for it. See [results and limits](agent-docs/issues-221-222-227-2026-10.md).
+
+## 1.6.5.2 - Reader wake and flashcard persistence (2026-10-15)
+
+- Fix waking from a book into its folder or Home by applying pending reader
+  transitions before dispatching input (#225). Manual sleep and Quick Resume
+  after inactivity return to the book.
+- Resume flashcard reviews at the same card, side and scroll position,
+  preserving the pending queue and session counts. Save ratings on sleep and
+  Home; reject incomplete progress writes and invalid or stale resume snapshots.
+- Recover reusable font caches before abandoning an EPUB chapter under memory
+  pressure. This mitigates a demonstrated failure path related to #223; the
+  reported book still needs confirmation.
+- Pass 664 native tests and six simulator sleep/wake scenarios covering EPUB,
+  TXT and flashcards. Physical X3/X4 validation remains pending. No OTA or SD
+  compatibility fix is claimed for #224 or #226. Partition tables and update
+  paths are unchanged; X4 Pro distribution remains withdrawn.
+
+## 1.6.5.1 - CrossPoint integration and navigation fixes (2026-10-08)
+
+- Integrate upstream `develop` through `28971493` (GitHub head checked on
+  2026-10-07), with FreeInk SDK `9729236c`: library indexing, SD plugins and
+  their web/event APIs, protected-content support, TTF fonts, layout fixes,
+  independent touch gestures, configurable Home actions and KOReader position
+  comparison. Start the CPR-vCodex 1.6.5 release line at 1.6.5.1 while retaining
+  the fork's four-part version and C3 release-asset naming.
+- Preserve CPR-vCodex statistics, offline Sync Day, achievements, favorites,
+  flashcards, StarDict/history, v5 bookmarks/highlights, Lyra Carousel,
+  Bionic Reading, text darkness, night mode, named KOReader profiles and JSON
+  settings. Retain the styled TXT/Markdown reader and stable book-data paths.
+- Adapt new layout word storage to retain inserted-hyphen metadata used by
+  highlights. Preserve reading positions, cover references and plugin sidecars
+  when renaming books on the device.
+- Keep the fork's header date and Sync Day reminder clear of the new fixed
+  battery/clock slots, including centered clocks and viewable display insets.
+- Build plugin networking/content crypto on C3 as well as S3, while retaining
+  the C3 certificate-verified OTA path and the existing partition tables.
+  Enable compiler/linker LTO to fit the combined firmware without removing
+  the fork's fonts or installed UI languages. Limit LTO to application objects,
+  leaving the custom ESP-IDF rebuild on its framework compiler flags to avoid
+  a clean-build DRAM section conflict. X4 Pro remains compile-only.
+- Fix mismatched list selections in Apps, Sync Day and other fork screens;
+  Plugins is selectable. Keep selected rows visible across scrolling and
+  orientation changes, including Classic and Lyra Custom.
+- Constrain oversized option/message popups to the screen and scroll their
+  contents. Long sleep-screen option lists no longer lose off-screen entries.
+- Stop one physical Back press from closing both a child screen and its
+  parent. Apps shortcuts retain their parent and selection; nested Settings,
+  OPDS selection and Screen Clean return one step at a time. Network cleanup
+  reboots and opening a reader retain their intentional memory-release paths.
+- Align Bionic Reading, font and refresh labels with their saved values;
+  restore all six refresh choices in quick settings. Refresh SD font discovery,
+  preview samples and fallback state; synchronize reader font reloads with
+  rendering. Correct the stopped auto-turn status and complete Spanish labels.
+  Quick settings and the preview editor remain separate; this is not a menu redesign.
+- Keep OTA directed at `franssjz/cpr-vcodex`, with verified manifest, image
+  digest, chip/board checks and inactive-slot writes. Add X3/X4 slot-limit,
+  retry and development-version coverage: 644 native tests, including 81 OTA
+  cases, pass. Simulator regressions cover popups, list selection, reader
+  settings and 29 Back-navigation scenarios.
+- Hardware scope: X4 original and X3 share the ESP32-C3 image. The dev35
+  candidate was USB-installed and booted twice on one X4 with the previous
+  firmware retained. This does not validate an end-to-end OTA update of this
+  release or physical X3 behavior. X3 OTA/SD, panel variants and recovery still
+  require device testing. Early boot confirmation limits automatic rollback;
+  no brick-free guarantee is made. X4 Pro distribution remains withdrawn, and
+  this BIN must not be installed on X4 Classic/X4C (ESP32-S3).
+- Preserve existing settings, books and reading data; no factory reset is
+  required. See `agent-docs/upstream-sync.md`, `agent-docs/simulator.md` and
+  `agent-docs/stability-audit-2026-09.md` for decisions and validation limits.
+
+## 1.6.0.38 — OTA and EPUB image fixes
+
+- Fix progressive JPEGs whose luminance and color components use separate
+  scans, and select the correct Huffman tables when skipping the last color
+  component during grayscale decoding (Crosspoint #2925, `6230eba2`). Keep the
+  existing MCU_SKIP memory/write guards. Add five pixel-exact regression cases
+  using the real firmware decoder, including the two previously failing cases.
+
+- Keep EPUB image grayscale enabled when text anti-aliasing is off. Previously,
+  light-mode reading displayed only the black/white image base, hiding diagram
+  labels and gray backgrounds. Adapt upstream Crosspoint `d1abcc00` (#2393)
+  while preserving the fork's dark-mode refresh and image polarity behavior.
+  Existing image caches remain valid; no settings reset or cache deletion is
+  needed. Verified with the reported JPEG and generated PNG render regressions
+  in the desktop simulator; physical e-ink confirmation remains pending.
+
+- Fix the update check failing on .37 with "Could not connect to update server".
+  The X4 ran out of memory while verifying the HTTPS certificate signature.
+  Adopt CrossInk's fresh network boot for OTA: Settings shows Loading and
+  restarts directly into Update, without retaining its lists or loading SD
+  reader fonts. Keep CPR-vCodex's settings, language, manifest and binary URLs,
+  certificate verification and firmware SHA-256 checks.
+- Reproduce the original TLS allocation failure on a USB-recoverable X4, then
+  verify the corrected check, complete 6,103,328-byte firmware download,
+  OTA installation and reboot. Verify the flashed image against the public BIN
+  over USB. See the stability audit for the hardware
+  record and remaining X3 validation.
+- If the installed updater cannot connect, install this C3 release through
+  SD Card Firmware Update or, on a USB-recoverable device, the browser flasher.
+  Keep settings and reading data; a factory reset is unnecessary.
+
+## 1.6.0.37 — X3/X4 stability and OTA status
+
+- Show the installed and published versions after a successful update check.
+  An equal or newer installed version reports that the device is up to date.
+  Separate connection/manifest errors from installation failures, and retry
+  the published manifest through GitHub's raw host with certificate validation.
+
+- Restore the saved UI language from its ISO code in `settings.json`. Migrate
+  older `language.bin` indices using the order shipped through 1.5.0.30,
+  including Vietnamese; retain the original file and reject truncated input.
+  Preserve unreadable settings files during migration. Render language names
+  with the existing Ubuntu UI fonts so Hebrew and Vietnamese are both readable.
+- Reject incomplete OTA manifests, invalid sizes and unusable URLs before
+  flashing. Add fault-injection tests for interrupted transfers, wrong chips
+  and boards, digest mismatches, and flash failures.
+- Handle allocation failures in BMP/JPEG/PNG dithering and PNG scaling instead
+  of aborting the firmware when memory is exhausted. Preserve existing image
+  thresholds and allocation sizes.
+- Correct documentation that advertised an unpublished 1.6.0.34 release.
+  Local builds no longer change the published-version row in README; the
+  existing release synchronization owns that update after publication.
+- Reject final BINs larger than the OTA slot, including image padding that
+  PlatformIO's ELF size omits. Keep the default diagnostic build at INFO.
+- Compact the remaining 24 dense built-in kerning tables into the sparse
+  format already supported by CrossPoint/CrossInk. Preserve every spacing
+  value, glyph and metric; recover about 326 KiB of flash without removing fonts.
+- Generate the ESP-IDF application descriptor from the same version as the UI,
+  preserving SDK boot compatibility fields. Reject stale application versions
+  and mismatched chips before packaging a BIN. Run packaging even when the
+  firmware is restored from the build cache.
+  See [the stability audit](agent-docs/stability-audit-2026-09.md) for evidence,
+  remaining hardware checks and the decision against a blanket rollback.
+
 This changelog starts at `1.2.0.24`, the point where CPR-vCodex began tracking release changes in this file.
 
 > Additional `1.5.0.20` sync: SD-font page bitmaps now use fragmentation-resistant 4 KiB chunks, and the font tooling can include IPA Extensions and Spacing Modifier Letters ([`28af4189`](https://github.com/crosspoint-reader/crosspoint-reader/commit/28af4189d45516e2d08539d82c607deb91bb8b38), [`5eec70de`](https://github.com/crosspoint-reader/crosspoint-reader/commit/5eec70de362b8311df6c9489646d0a061cd0e49a)).
@@ -23,9 +185,16 @@ This changelog starts at `1.2.0.24`, the point where CPR-vCodex began tracking r
 > Added `Hide File Extension`, with translations for all 23 UI languages, and made `/fonts`, `/dictionaries`, `/.sleep`, and `/sleep` resolve regardless of capitalization while preserving the exact on-card path for reads, installs, and deletion ([`e0441c63`](https://github.com/uxjulia/CrossInk/commit/e0441c63), [`b1ed6a98`](https://github.com/uxjulia/CrossInk/commit/b1ed6a98)).
 >
 > Follow-up hardening keeps the File Browser's 640-byte JSON workspace off the network task stack, exposes only a boolean “configured” hint for the write-only KOReader password, clears password replacements from the browser after saving, and logs the free/contiguous heap recovered by releasing SD fonts before Wi-Fi. Host regressions now also round-trip section-cache text blocks with inserted-hyphen/ruby/focus metadata and verify case-insensitive SD root discovery preserves the stored directory spelling.
-
+>
 | Version | Changes |
 |---|---|
+| `1.6.5.3` | - Improve large Highlights lists with bounded label caching and batched SD-font glyph loading; preserve short presses across slow rendering and keep hold-to-page navigation (#227).<br>- Report actual KOReader ESP/TLS failures and the attempted server origin instead of misleading HTTP -1 responses (#221).<br>- Retry registration, authentication or manual sync once through a fresh boot only when the TLS memory check rejects the operation before any request is sent. Preserve saved profile identity, book position and reader font; keep certificate verification and prevent restart loops or replay after an uncertain registration result (#222).<br>- Show the effective KOReader server URL and correct the documented default without changing saved profiles.<br>- Pass all 719 native tests, 256-highlight simulator lists and 17 KOReader simulator checks. Physical X3/X4 TLS/restart confirmation and the separate older-highlight error remain pending. |
+| `1.6.5.2` | - Fix waking from a book into its folder or Home by applying pending reader transitions before dispatching input (#225). Manual sleep and Quick Resume after inactivity return to the book.<br>- Resume flashcard reviews at the same card, side and scroll position, preserving the pending queue and session counts. Save ratings on sleep and Home; reject incomplete progress writes and invalid or stale resume snapshots.<br>- Recover reusable font caches before abandoning an EPUB chapter under memory pressure. This mitigates a demonstrated failure path related to #223; the reported book still needs confirmation.<br>- Pass 664 native tests and six simulator sleep/wake scenarios covering EPUB, TXT and flashcards. Physical X3/X4 validation remains pending.<br>- No OTA or SD compatibility fix is claimed for #224 or #226. Partition tables and update paths are unchanged; X4 Pro distribution remains withdrawn. |
+| `1.6.5.1` | - Integrate CrossPoint develop through `28971493` with FreeInk SDK `9729236c`, retaining CPR-vCodex statistics, Sync Day, achievements, favorites, flashcards, dictionaries, bookmarks/highlights, themes and reader settings.<br>- Add upstream library indexing, SD plugins and web/event APIs, TTF fonts, protected-content support and layout improvements.<br>- Fix mismatched selections in Apps, Sync Day and other lists, make Plugins selectable, and scroll oversized popups instead of clipping their contents.<br>- Make one Back press return one step in nested screens; preserve Apps context and selection. Keep intentional network cleanup restarts and reader memory-release paths.<br>- Correct reader setting labels, refresh choices, SD font discovery and previews, render synchronization and Spanish text. Quick settings and the preview editor remain separate.<br>- Preserve the fork's OTA repository, certificate-verified manifest, SHA-256/chip/board checks, inactive-slot writes and partition tables. All 644 native tests pass, including 81 OTA cases; simulator coverage includes 29 Back-navigation scenarios.<br>- Scope LTO to application objects so clean custom ESP-IDF builds remain reproducible.<br>- Hardware validation is limited: a development candidate booted twice on one original X4 after USB installation. End-to-end OTA for this release and physical X3 OTA/SD/recovery remain unverified. Early boot confirmation limits automatic rollback; no brick-free guarantee is made.<br>- Publish only the ESP32-C3 image for original X4/X3. X4 Pro distribution remains withdrawn. Do not install this BIN on X4 Classic/X4C (ESP32-S3). Existing settings and reading data are retained; no factory reset is required. |
+| `1.6.0.38` | - Fix .37's update-check failure caused by insufficient RAM during HTTPS certificate signature verification on X4.<br>- Adapt CrossInk's fresh network boot to CPR-vCodex: Settings briefly shows Loading, then enters Update without retaining the Settings screen or SD reader fonts.<br>- Keep the fork's settings, languages, repository, manifest, C3 binary naming, certificate verification and SHA-256 validation.<br>- Reproduced the original failure and verified the corrected query, complete download, OTA installation and reboot on a USB-recoverable X4; the flashed image matches the public BIN. X3 hardware validation remains pending; see the stability audit.<br>- Devices whose installed OTA client cannot connect need this release through SD Card Firmware Update or a supported USB flash. Preserve settings and reading data. X4 Pro distribution remains withdrawn.<br>- Restore EPUB image grayscale with text anti-aliasing off (#215), without clearing existing caches or settings.<br>- Fix progressive JPEG decoding with separate component scans and chroma Huffman tables (Crosspoint #2925); retain existing memory guards.<br>- All 274 native tests pass, including five real-decoder JPEG cases. Simulator regressions cover image grayscale and existing caches. The development build booted twice and confirmed its OTA slot on X4; physical EPUB rendering and X3 validation remain pending. |
+| `1.6.0.37` | - X3/X4 stabilization release; X4 Pro distribution remains withdrawn.<br>- OTA status shows installed and published versions, reports equal/newer builds as up to date, and distinguishes failed checks from failed installations. Certificate-verified manifest fallback improves resilience when Pages is unreachable.<br>- Repair OTA payload transport; require a complete authenticated manifest and verify size, SHA-256, chip and board before activating the inactive slot.<br>- Preserve saved ISO language codes and migrate historical language indices without deleting the original settings. Keep all 24 UI languages, including Spanish.<br>- Handle image allocation failures and recover about 326 KiB of font-table flash without changing glyphs, metrics or spacing.<br>- Validate packaged image size, chip and embedded application version, including cached builds.<br>- Automated fault-injection and simulator checks are documented in the stability audit. End-to-end OTA/reboot on physical X3 and X4 remains unverified; an installed client stuck at 0 B may need the SD Card Firmware Update path described in README. |
+| `1.6.0.34` | - Fixed Wi-Fi OTA downloads stopping at `0 B / 0%` on X3/X4, reported in [#219](https://github.com/franssjz/cpr-vcodex/issues/219). The regression entered with the 1.6.0.31 network migration: after the verified manifest request, the ESP32-C3 could fail to allocate the certificate-backed second TLS session before receiving any firmware bytes.<br>- Restored the proven low-fragmentation Arduino TLS transport for the firmware payload only. The manifest remains certificate-verified, its SHA-256 is now mandatory, and the downloaded image is activated only after its exact size, SHA-256, ESP chip, CPR-vCodex board tag, and ESP image structure all validate.<br>- Streams the image directly into the inactive OTA partition and aborts without selecting it on any network, write, identity, size, or digest failure. This follows CrossPoint's direct-slot OTA design from [`3e627112`](https://github.com/crosspoint-reader/crosspoint-reader/commit/3e627112) while retaining CPR-vCodex's stronger board and release-manifest checks.<br>- Documented the one-time Wi-Fi File Transfer bridge required by devices already running 1.6.0.31-1.6.0.33: their faulty updater cannot repair itself until 1.6.0.34 is installed through `SD Card Firmware Update`; later OTA updates use the repaired path normally.<br>- Passed the firmware-manifest regressions and the `gh_release` ESP32-C3 build. The packaged image is 6,433,776 bytes and fits the 6,553,600-byte X4/X3 OTA slot with 119,824 bytes remaining; physical X3/X4 OTA confirmation is still requested. |
+| `1.6.0.33` | - Hardened EPUB image rendering for [#217](https://github.com/franssjz/cpr-vcodex/issues/217): `.pxc` caches now carry a format and calibration version, so old quantized pixels rebuild once and the contrast correction from [#215](https://github.com/franssjz/cpr-vcodex/issues/215) is applied to existing books. Image failures are scoped to the loaded page instead of the reader session, allowing later visits to recover from transient SD or low-memory failures.<br>- Reduced fragmentation during text and image reading by releasing rebuildable font caches before section construction, making full-page SD-font prewarm replace the prior page, reserving growing bitmap arenas before rebuilding their smaller metadata, and giving page elements unique ownership. These changes selectively adapt CrossPoint [`c4d8c395`](https://github.com/crosspoint-reader/crosspoint-reader/commit/c4d8c395), [`c80c537f`](https://github.com/crosspoint-reader/crosspoint-reader/commit/c80c537f), and [`c33a8b0e`](https://github.com/crosspoint-reader/crosspoint-reader/commit/c33a8b0e).<br>- Made short button presses harder to miss during the idle wait by following CrossPoint [`9ba16086`](https://github.com/crosspoint-reader/crosspoint-reader/commit/9ba16086), and forced one clean splashless X4 wake refresh to avoid retained sleep-screen pixels, mirroring freeink-sdk [`6644bf2`](https://github.com/Free-Ink/freeink-sdk/commit/6644bf2).<br>- Passed 43 reader regressions, six SD-font cache regressions, and both `default` and `gh_release` ESP32-C3 builds. The published release image is 6,391,952 bytes and fits the 6,553,600-byte X4 OTA slot; the hardware-specific wake and short-press paths still require confirmation on a physical device. |
 | `1.6.0.32` | - Withdrew X4 Pro firmware distribution again after [#212](https://github.com/franssjz/cpr-vcodex/issues/212) confirmed that affected CN/USB-locked devices may have no usable USB recovery path. Stable releases and release candidates now publish only the shared ESP32-C3 X4/X3 image; CI keeps the X4 Pro target compile-only and does not upload its binary.<br>- Hardened Pages and Auto Flash so X4 is always the default, X4 Pro is visibly marked as withdrawn and cannot be selected or flashed, stale X4 Pro browser binaries are deleted, and generated manifests reject `devices.x4pro` even if an old release still contains an asset.<br>- Reworked four-level Bayer quantization to preserve average luminance across the full grayscale range, retaining dark and midtone image detail reported as crushed in [#215](https://github.com/franssjz/cpr-vcodex/issues/215).<br>- Changed Library/list long-press paging to fire once per physical hold instead of repeating during slow e-ink refreshes, fixing multi-page jumps reported in [#214](https://github.com/franssjz/cpr-vcodex/issues/214).<br>- Passed 40 reader regressions, four Auto Flash regressions, workflow/Python/JavaScript syntax checks, and the `gh_release` ESP32-C3 build. The packaged image is 6,390,608 bytes and fits the 6,553,600-byte X4 OTA slot. Issue [#213](https://github.com/franssjz/cpr-vcodex/issues/213) remains under investigation and is not claimed as fixed by this release. |
 | `1.6.0.31` | - Moved the firmware base from CrossPoint Reader 1.5.0 to 1.6.0 while retaining CPR-vCodex's release counter and fork features.<br>- Replaced the incomplete experimental X4 Pro build from releases 1.5.0.28–1.5.0.30 with the complete FreeInkUI/X4 Pro integration from [PR #206](https://github.com/franssjz/cpr-vcodex/pull/206), based on CrossPoint Reader `develop` [`233f93ff`](https://github.com/crosspoint-reader/crosspoint-reader/commit/233f93ff) and freeink-sdk [`cb9167d5`](https://github.com/Free-Ink/freeink-sdk/commit/cb9167d541c0f6e9d57cf8eae1f564a939883ecc). This adds the ESP32-S3 power-rail hold, SSD1677/UC8179 panel detection, GT911 touch, capacitive Home key, frontlight, USB Drive, touch-sized FreeInkUI screens, per-board OTA selection, and the correct X4 Pro partition profile.<br>- Fixed the post-update freeze reported in [#212](https://github.com/franssjz/cpr-vcodex/issues/212): X4 Pro now keeps its power rails asserted before initialization, confirms the OTA slot, stays awake after USB-powered boots, and uses the non-strap `DOWN` key instead of `UP/GPIO0` for SD recovery.<br>- Restored X4 Pro on CPR-vCodex Auto Flash. The page selects the dedicated `<tag>-x4pro.bin`, verifies the ESP32-S3 chip and supported partition layout, checks size and SHA-256, writes the inactive app slot at offset `0x10000`, and presents the required manual power-cycle instructions.<br>- Kept JSON settings compatibility, BookmarkStore v5 bookmarks/highlights, StarDict dictionaries, Bookerly/NotoSans fonts, reading statistics, Lyra themes, boot recovery, and the fork release flow. Existing section, book-metadata, and CSS caches rebuild once.<br>- Validation: 230/230 host tests pass; the Windows/WSL X4 Pro simulator passes touch navigation, Home-key return, and frontlight-panel checks; both release targets are gated by PlatformIO builds and per-board firmware-budget validation. The underlying X4 Pro integration was exercised on physical hardware by the PR author, but this release itself still needs confirmation from an affected X4 Pro user. |
 | `1.5.0.24` | - Prevented page turns, bookmarks, and reader exit from aborting while closing a reading session after the session-history vector reached capacity. The log now makes room before append, keeps the newest 128 entries, compacts oversized imported history during load, and avoids retaining redundant book paths when a stable book ID is available ([#205](https://github.com/franssjz/cpr-vcodex/issues/205)).<br>- Restored Thai dictionary definitions when an SD-card `.cpfont` is active by reusing the already loaded reader font for definition rendering, while retaining the configured built-in UI font sizes for built-in reader fonts and avoiding another font allocation ([#186](https://github.com/franssjz/cpr-vcodex/issues/186)).<br>- Passed all 48 host regressions plus `default` and `gh_release` ESP32-C3 builds. Physical validation with a Thai dictionary and compatible `.cpfont` remains requested. |

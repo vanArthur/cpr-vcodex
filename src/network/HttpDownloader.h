@@ -1,8 +1,11 @@
 #pragma once
 #include <HalStorage.h>
 
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 /**
  * HTTP client utility for fetching content and downloading files. Built on
@@ -15,12 +18,14 @@ class HttpDownloader {
   // Called with each body chunk as it arrives; return false to abort. Lets a
   // streaming parser consume the response without buffering the whole body.
   using DataCallback = std::function<bool(const uint8_t* data, size_t len)>;
+  using Header = std::pair<std::string, std::string>;
 
   enum DownloadError {
     OK = 0,
     HTTP_ERROR,
     FILE_ERROR,
     ABORTED,
+    UNAUTHORIZED,
   };
 
   // Pre-flight floor for starting a TLS transfer. Below this the session or
@@ -46,6 +51,15 @@ class HttpDownloader {
                        const std::string& password = "");
 
   /**
+   * Stream an OTA image through the pre-1.6.0.31 Arduino TLS transport. Peer
+   * verification is intentionally skipped here to avoid the C3 certificate
+   * heap spike; callers MUST authenticate the bytes against a SHA-256 obtained
+   * from a separately verified manifest before activating the OTA partition.
+   */
+  static DownloadError fetchOtaImage(const std::string& url, const DataCallback& onData,
+                                     ProgressCallback progress = nullptr);
+
+  /**
    * Download a file to the SD card with optional credentials.
    *
    * downgradeRedirectsToHttp rewrites followed redirect targets from https to
@@ -53,7 +67,7 @@ class HttpDownloader {
    * buffer — the OOM site on low-heap C3 boards).
    */
   static DownloadError downloadToFile(const std::string& url, const std::string& destPath,
-                                      ProgressCallback progress = nullptr, bool* cancelFlag = nullptr,
+                                      ProgressCallback progress = nullptr, const bool* cancelFlag = nullptr,
                                       const std::string& username = "", const std::string& password = "",
-                                      bool downgradeRedirectsToHttp = false);
+                                      const std::vector<Header>& headers = {}, bool downgradeRedirectsToHttp = false);
 };
