@@ -1831,10 +1831,12 @@ void SleepActivity::renderReadingHeatmapSleepScreen() const {
   const int offsetX = (screenW - gridWidth) / 2;
   const int offsetY = gap;
   const uint32_t referenceDayOrdinal = getHeatmapReferenceDayOrdinal();
+  const uint64_t goalMs = std::max<uint64_t>(1, getDailyReadingGoalMs());
+  const int innerSize = std::max(0, cellSize - 2);
+  // Partial squares stay clear of the 2px border, so they read as a separate mark.
+  const int maxPartialSize = std::max(4, cellSize - 8);
 
   renderer.clearScreen();
-
-  constexpr uint64_t GOAL_MS = 30ULL * 60ULL * 1000ULL;
 
   for (int row = 0; row < rows; ++row) {
     for (int col = 0; col < cols; ++col) {
@@ -1847,8 +1849,18 @@ void SleepActivity::renderReadingHeatmapSleepScreen() const {
                                       : 0;
       const uint64_t readingMs = getReadingMsForDayOrdinal(dayOrdinal);
 
-      if (readingMs >= GOAL_MS) {
-        renderer.fillRect(x + 1, y + 1, std::max(0, cellSize - 2), std::max(0, cellSize - 2), true);
+      if (readingMs >= goalMs) {
+        renderer.fillRect(x + 1, y + 1, innerSize, innerSize, true);
+      } else if (readingMs > 0) {
+        // Partial days get a grey centered square whose area tracks progress toward the goal.
+        const float ratio = static_cast<float>(readingMs) / static_cast<float>(goalMs);
+        int partialSize = std::clamp(static_cast<int>(std::sqrt(ratio) * maxPartialSize), 4, maxPartialSize);
+        // Match the cell's parity so the leftover space splits evenly on both sides.
+        if ((cellSize - partialSize) % 2 != 0) {
+          partialSize--;
+        }
+        const int partialOffset = (cellSize - partialSize) / 2;
+        renderer.fillRectDither(x + partialOffset, y + partialOffset, partialSize, partialSize, Color::DarkGray);
       }
 
       renderer.drawRect(x, y, cellSize, cellSize, 2, true);
@@ -1861,8 +1873,9 @@ void SleepActivity::renderReadingHeatmapSleepScreen() const {
   const std::string todayReading = ReadingStatsAnalytics::formatDurationHm(READING_STATS.getTodayReadingMs());
   if (!bookTitle.empty()) {
     const std::string bottomText = bookTitle + " (" + bookProgress + ")" + " | " + todayReading;
+    const std::string fitted = renderer.truncatedText(SMALL_FONT_ID, bottomText.c_str(), screenW - 2 * gap);
     const int titleY = gridBottom + (screenH - gridBottom - 40) / 2;
-    renderer.drawCenteredText(SMALL_FONT_ID, titleY, bottomText.c_str());
+    renderer.drawCenteredText(SMALL_FONT_ID, titleY, fitted.c_str());
   }
 
   displaySleepBuffer(renderer);
