@@ -38,6 +38,23 @@ class EpubReaderActivity final : public Activity {
   int initialBookmarkSpineIndex = -1;
   int initialBookmarkPage = -1;
   std::optional<uint32_t> initialBookmarkVisibleTextOffset;
+  int pendingHighlightIndex = -1;
+  // Verified ranges belong to the current Section/layout only. Keep original
+  // bookmark records intact; a later layout resolves the saved text again.
+  struct ResolvedHighlight {
+    int bookmarkIndex = -1;
+    int firstPage = -1;
+    int lastPage = -1;
+    size_t firstWord = 0;
+    size_t lastWord = 0;
+    bool matched = false;
+  };
+  static constexpr size_t HIGHLIGHT_RESOLUTION_CACHE_SIZE = 8;
+  static_assert(HIGHLIGHT_RESOLUTION_CACHE_SIZE <= 8);
+  static constexpr int HIGHLIGHT_SEARCH_RADIUS = 3;
+  ResolvedHighlight resolvedHighlights[HIGHLIGHT_RESOLUTION_CACHE_SIZE]{};
+  size_t nextHighlightResolution = 0;
+  int lastHighlightRecoveryPage = -1;
   int pagesUntilFullRefresh = 0;
   int cachedSpineIndex = 0;
   int cachedChapterTotalPageCount = 0;
@@ -202,6 +219,11 @@ class EpubReaderActivity final : public Activity {
   void renderContents(std::shared_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void drawTextHighlights(const Page& page, int orientedMarginTop, int orientedMarginLeft) const;
+  void clearHighlightResolutions();
+  bool resolvePendingHighlight(bool& allowBuild);
+  bool resolveVisibleHighlights(std::unique_ptr<Page>& page, bool& allowBuild);
+  bool extendHighlightBuild(int pages, bool& allowBuild);
+  bool resolveHighlight(int index, int pageHint, bool navigate, bool& allowBuild, uint8_t* protectedSlots = nullptr);
   void renderStatusBar() const;
   void renderSectionLoadFailure();
   void renderEndOfBook();
@@ -292,7 +314,7 @@ class EpubReaderActivity final : public Activity {
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,
                               int initialBookmarkSpineIndex = -1, int initialBookmarkPage = -1,
                               std::optional<uint32_t> initialBookmarkVisibleTextOffset = std::nullopt,
-                              bool allowFastInitialRefresh = false);
+                              bool allowFastInitialRefresh = false, int initialBookmarkIndex = -1);
   ~EpubReaderActivity() override;
   void onEnter() override;
   void onExit() override;

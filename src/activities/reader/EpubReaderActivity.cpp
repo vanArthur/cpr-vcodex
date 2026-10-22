@@ -18,7 +18,6 @@
 #include <esp_system.h>
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -242,13 +241,107 @@ bool hasEmSpacePrefix(const char* text) {
          static_cast<unsigned char>(text[2]) == 0x83;
 }
 
-HighlightTextMatcher::TokenFragmentResult matchHighlightFragment(const HighlightWordRef& ref, const char* token,
-                                                                 const size_t tokenLength, const size_t tokenOffset) {
-  const char* rawWord = ref.block->wordText(ref.index);
-  const char* word = rawWord + (hasEmSpacePrefix(rawWord) ? 3 : 0);
-  return HighlightTextMatcher::matchTokenFragment(word, ref.block->wordEndsWithInsertedHyphen(ref.index), token,
-                                                  tokenLength, tokenOffset);
-}
+// A cursor over one or two pages, with no word array or truncated word count.
+// Matching usually visits words in order; rewind only for overlapping starts.
+class HighlightPageWords {
+  const Page* pages[2];
+  size_t firstCount = 0;
+  size_t totalCount = 0;
+  size_t logicalIndex = 0;
+  size_t elementIndex = 0;
+  size_t wordIndex = 0;
+  unsigned pageIndex = 0;
+  bool positioned = false;
+  HighlightWordRef current;
+
+  static bool visible(const char* raw) {
+    if (!raw) return false;
+    const char* cursor = raw + (hasEmSpacePrefix(raw) ? 3 : 0);
+    for (; *cursor; ++cursor) {
+      if (*cursor != ' ' && *cursor != '\t' && *cursor != '\r' && *cursor != '\n') return true;
+    }
+    return false;
+  }
+
+  static size_t count(const Page* page) {
+    if (!page) return 0;
+    size_t result = 0;
+    for (const auto& element : page->elements) {
+      if (!element || element->getTag() != TAG_PageLine) continue;
+      const auto* block = static_cast<const PageLine&>(*element).getBlock();
+      if (!block) continue;
+      for (size_t i = 0; i < block->wordCount(); ++i) {
+        if (visible(block->wordText(i))) ++result;
+      }
+    }
+    return result;
+  }
+
+  bool advance() {
+    for (; pageIndex < 2; ++pageIndex, elementIndex = 0, wordIndex = 0) {
+      if (!pages[pageIndex]) continue;
+      const auto& elements = pages[pageIndex]->elements;
+      for (; elementIndex < elements.size(); ++elementIndex, wordIndex = 0) {
+        const auto& element = elements[elementIndex];
+        if (!element || element->getTag() != TAG_PageLine) continue;
+        const auto& line = static_cast<const PageLine&>(*element);
+        const auto* block = line.getBlock();
+        if (!block) continue;
+        while (wordIndex < block->wordCount()) {
+          const auto index = static_cast<uint16_t>(wordIndex++);
+          if (!visible(block->wordText(index))) continue;
+          current = {&line, block, index};
+          return true;
+        }
+      }
+    }
+    current = {};
+    return false;
+  }
+
+ public:
+  explicit HighlightPageWords(const Page& first, const Page* second = nullptr) : pages{&first, second} {
+    firstCount = count(&first);
+    totalCount = firstCount + count(second);
+  }
+  size_t size() const { return totalCount; }
+  size_t firstPageSize() const { return firstCount; }
+  HighlightWordRef at(const size_t index) {
+    if (index >= totalCount) return {};
+    if (!positioned || index < logicalIndex) {
+      pageIndex = 0;
+      elementIndex = wordIndex = logicalIndex = 0;
+      positioned = advance();
+    }
+    while (positioned && logicalIndex < index) {
+      positioned = advance();
+      ++logicalIndex;
+    }
+    return current;
+  }
+  HighlightTextMatcher::Word word(const size_t index) {
+    const auto ref = at(index);
+    if (!ref.block) return {};
+    const char* raw = ref.block->wordText(ref.index);
+    return {raw + (hasEmSpacePrefix(raw) ? 3 : 0), ref.block->wordEndsWithInsertedHyphen(ref.index)};
+  }
+  bool hasSelectionOrder(const int fontAscender) {
+    // The selector sorts by visual position. Trust its fresh indices only when
+    // that order agrees with this page's traversal (including ruby offsets).
+    int previousX = 0;
+    int previousY = 0;
+    for (size_t index = 0; index < totalCount; ++index) {
+      const auto ref = at(index);
+      if (!ref.block || !ref.block->valid()) return false;
+      const int x = ref.line->xPos + ref.block->wordXpos(ref.index);
+      const int y = ref.line->yPos + ref.block->getRubyShift(fontAscender);
+      if (index > 0 && (y < previousY || (y - previousY <= 2 && x <= previousX))) return false;
+      previousX = x;
+      previousY = y;
+    }
+    return true;
+  }
+};
 
 }  // namespace
 
@@ -256,12 +349,13 @@ EpubReaderActivity::EpubReaderActivity(GfxRenderer& renderer, MappedInputManager
                                        std::unique_ptr<Epub> epub, const int initialBookmarkSpineIndex,
                                        const int initialBookmarkPage,
                                        const std::optional<uint32_t> initialBookmarkVisibleTextOffset,
-                                       const bool allowFastInitialRefresh)
+                                       const bool allowFastInitialRefresh, const int initialBookmarkIndex)
     : Activity("EpubReader", renderer, mappedInput),
       epub(std::move(epub)),
       initialBookmarkSpineIndex(initialBookmarkSpineIndex),
       initialBookmarkPage(initialBookmarkPage),
-      initialBookmarkVisibleTextOffset(initialBookmarkVisibleTextOffset) {
+      initialBookmarkVisibleTextOffset(initialBookmarkVisibleTextOffset),
+      pendingHighlightIndex(initialBookmarkIndex) {
   if (allowFastInitialRefresh) {
     // Upstream: boot -> last book handoff may skip the first clean refresh.
     const int refreshFrequency = SETTINGS.getRefreshFrequency();
@@ -299,6 +393,20 @@ void EpubReaderActivity::onEnter() {
   applyPendingSyncSession();
   stableBookId = BookIdentity::resolveStableBookId(epub->getPath());
   bookmarkStore.load(epub->getCachePath(), stableBookId);
+  if (pendingHighlightIndex >= 0) {
+    const auto& bookmarks = bookmarkStore.getAll();
+    if (static_cast<size_t>(pendingHighlightIndex) >= bookmarks.size()) {
+      pendingHighlightIndex = -1;
+    } else {
+      const auto& selected = bookmarks[pendingHighlightIndex];
+      if (!selected.isTextHighlight || selected.spineIndex != initialBookmarkSpineIndex ||
+          selected.pageNumber != initialBookmarkPage ||
+          selected.hasVisibleTextOffset != initialBookmarkVisibleTextOffset.has_value() ||
+          (selected.hasVisibleTextOffset && selected.visibleTextOffset != *initialBookmarkVisibleTextOffset)) {
+        pendingHighlightIndex = -1;
+      }
+    }
+  }
 
   HalFile f;
   bool loadedProgress = false;
@@ -650,6 +758,7 @@ void EpubReaderActivity::openDictionaryWordSelect() {
 
 // Fork page-mark toggle (long Confirm press / toolbar), with the achievement hook.
 void EpubReaderActivity::toggleCurrentPageBookmark() {
+  RenderLock lock(*this);
   if (!section || section->currentPage < 0 || section->currentPage >= section->pageCount) {
     return;
   }
@@ -659,6 +768,7 @@ void EpubReaderActivity::toggleCurrentPageBookmark() {
   const auto visibleOffset = section->getVisibleTextOffsetForPage(pageNumber);
   const bool wasBookmarked = bookmarkStore.has(spineIndex, pageNumber, visibleOffset);
   const std::string snippet = wasBookmarked ? "" : extractBookmarkSnippet(*section);
+  clearHighlightResolutions();
   const bool addedBookmark = bookmarkStore.toggle(spineIndex, pageNumber, snippet, visibleOffset);
   bookmarkStore.save();
   if (addedBookmark && epub && !READING_STATS.shouldIgnorePath(epub->getPath())) {
@@ -1234,6 +1344,7 @@ std::shared_ptr<Page> EpubReaderActivity::loadCurrentPageForOverlay(int& outMarg
 }
 
 void EpubReaderActivity::saveCurrentPageBookmark() {
+  RenderLock lock(*this);
   if (!section || section->currentPage < 0 || section->currentPage >= section->pageCount) {
     requestUpdate();
     return;
@@ -1251,6 +1362,7 @@ void EpubReaderActivity::saveCurrentPageBookmark() {
   }
 
   const std::string snippet = extractBookmarkSnippet(*section);
+  clearHighlightResolutions();
   const bool addedBookmark = bookmarkStore.toggle(spineIndex, pageNumber, snippet, visibleOffset);
   bookmarkStore.save();
   if (addedBookmark && epub && !READING_STATS.shouldIgnorePath(epub->getPath())) {
@@ -1520,8 +1632,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       startActivityForResult(
           std::make_unique<BookmarksActivity>(renderer, mappedInput, bookmarkStore.getAll(), epub, "",
                                               [this](const BookmarkStore::Bookmark& bookmark) {
+                                                RenderLock lock(*this);
                                                 const bool removed = bookmarkStore.removeItem(bookmark);
                                                 if (removed) {
+                                                  clearHighlightResolutions();
                                                   bookmarkStore.save();
                                                 }
                                                 return removed;
@@ -1530,10 +1644,22 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
             READING_STATS.resumeSession();
             if (!result.isCancelled) {
               const auto& bookmark = std::get<BookmarkResult>(result.data);
+              const auto& saved = bookmarkStore.getAll();
+              const int highlightIndex =
+                  bookmark.bookmarkIndex >= 0 && static_cast<size_t>(bookmark.bookmarkIndex) < saved.size() &&
+                          saved[bookmark.bookmarkIndex].isTextHighlight &&
+                          saved[bookmark.bookmarkIndex].spineIndex == bookmark.spineIndex &&
+                          saved[bookmark.bookmarkIndex].pageNumber == bookmark.page &&
+                          saved[bookmark.bookmarkIndex].hasVisibleTextOffset == bookmark.hasVisibleTextOffset &&
+                          (!bookmark.hasVisibleTextOffset ||
+                           saved[bookmark.bookmarkIndex].visibleTextOffset == bookmark.visibleTextOffset)
+                      ? bookmark.bookmarkIndex
+                      : -1;
               const bool needsAnchorJump = bookmark.hasVisibleTextOffset;
               if (needsAnchorJump && currentSpineIndex == bookmark.spineIndex && section) {
                 RenderLock lock(*this);
                 if (const auto page = section->getPageForVisibleTextOffset(bookmark.visibleTextOffset)) {
+                  pendingHighlightIndex = highlightIndex;
                   clearDeferredReposition();
                   section->currentPage = *page;
                   nextPageNumber = *page;
@@ -1546,6 +1672,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               if (needsAnchorJump || currentSpineIndex != bookmark.spineIndex || !section ||
                   section->currentPage != static_cast<int>(bookmark.page)) {
                 RenderLock lock(*this);
+                pendingHighlightIndex = highlightIndex;
                 clearDeferredReposition();
                 currentSpineIndex = bookmark.spineIndex;
                 nextPageNumber = static_cast<int>(bookmark.page);
@@ -1555,6 +1682,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                 section.reset();
                 requestUpdate();
                 return;
+              }
+              {
+                RenderLock lock(*this);
+                pendingHighlightIndex = highlightIndex;
               }
             }
             updateBookmarkFlag();
@@ -1578,19 +1709,57 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       const uint16_t selectionSpine = static_cast<uint16_t>(currentSpineIndex);
       const uint16_t selectionPage = static_cast<uint16_t>(section->currentPage);
       const uint32_t selectionVisibleOffset = page->visibleTextOffset;
+      const Section* selectionSection = section.get();
       READING_STATS.noteActivity();
       startActivityForResult(
           std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, page, SETTINGS.getReaderFontId(),
                                                          overlayMarginLeft, overlayMarginTop, true),
-          [this, selectionSpine, selectionPage, selectionVisibleOffset](const ActivityResult& result) {
+          [this, selectionSpine, selectionPage, selectionVisibleOffset, selectionSection,
+           page](const ActivityResult& result) {
             READING_STATS.resumeSession();
             if (!result.isCancelled) {
               const auto& highlight = std::get<HighlightResult>(result.data);
+              RenderLock lock(*this);
               const bool saved =
                   bookmarkStore.addTextHighlight(selectionSpine, selectionPage, selectionPage, highlight.startWordIndex,
                                                  highlight.endWordIndex, highlight.text, selectionVisibleOffset);
               if (saved) {
                 bookmarkStore.save();
+                // This range comes directly from the user's current selection,
+                // so it remains valid even for repeated text, a selected hyphen
+                // fragment, or a snippet truncated at the persistence limit.
+                // Never infer that trust for a record loaded from an old layout.
+                HighlightPageWords selectedWords(*page);
+                if (section.get() == selectionSection && currentSpineIndex == selectionSpine &&
+                    highlight.startWordIndex <= highlight.endWordIndex &&
+                    highlight.endWordIndex < selectedWords.size() &&
+                    selectedWords.hasSelectionOrder(renderer.getFontAscenderSize(SETTINGS.getReaderFontId()))) {
+                  const auto& bookmarks = bookmarkStore.getAll();
+                  for (size_t index = 0; index < bookmarks.size(); ++index) {
+                    const auto& item = bookmarks[index];
+                    if (!item.isTextHighlight || item.spineIndex != selectionSpine || item.snippet != highlight.text) {
+                      continue;
+                    }
+                    const bool sameSelection = item.hasVisibleTextOffset
+                                                   ? item.visibleTextOffset == selectionVisibleOffset
+                                                   : item.pageNumber == selectionPage &&
+                                                         item.endPageNumber == selectionPage &&
+                                                         item.startWordIndex == highlight.startWordIndex &&
+                                                         item.endWordIndex == highlight.endWordIndex;
+                    if (!sameSelection) continue;
+                    ResolvedHighlight* cached = nullptr;
+                    for (auto& entry : resolvedHighlights) {
+                      if (entry.bookmarkIndex == static_cast<int>(index)) cached = &entry;
+                    }
+                    if (!cached) {
+                      cached = &resolvedHighlights[nextHighlightResolution];
+                      nextHighlightResolution = (nextHighlightResolution + 1) % HIGHLIGHT_RESOLUTION_CACHE_SIZE;
+                    }
+                    *cached = {static_cast<int>(index),  selectionPage,          selectionPage,
+                               highlight.startWordIndex, highlight.endWordIndex, true};
+                    break;
+                  }
+                }
                 if (epub && !READING_STATS.shouldIgnorePath(epub->getPath())) {
                   ACHIEVEMENTS.recordBookmarkAdded();
                 }
@@ -1963,6 +2132,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   const ReaderRenderSpec renderSpec = makeRenderSpec(viewportWidth, viewportHeight);
 
   if (!section) {
+    clearHighlightResolutions();
     const auto filepath = epub->getSpineItem(currentSpineIndex).href;
     LOG_DBG("ERS", "Loading file: %s, index: %d", filepath.c_str(), currentSpineIndex);
     section = std::unique_ptr<Section>(new Section(epub, currentSpineIndex, renderer));
@@ -2178,6 +2348,13 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     section->currentPage = section->pageCount - 1;
   }
   applyDeferredReposition();
+  bool allowHighlightBuild = true;
+  if (!resolvePendingHighlight(allowHighlightBuild)) {
+    section.reset();
+    renderSectionLoadFailure();
+    automaticPageTurnActive = false;
+    return;
+  }
 
   renderer.clearScreen();
 
@@ -2206,6 +2383,12 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   {
     auto loadedPage = section->loadPage(section->currentPage);
+    if (loadedPage && !resolveVisibleHighlights(loadedPage, allowHighlightBuild)) {
+      section.reset();
+      renderSectionLoadFailure();
+      automaticPageTurnActive = false;
+      return;
+    }
     if (!loadedPage) {
       LOG_ERR("ERS", "Failed to load page from SD - clearing section cache");
       automaticPageTurnActive = false;
@@ -2325,103 +2508,273 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
   }
 }
 
-void EpubReaderActivity::drawTextHighlights(const Page& page, const int orientedMarginTop,
-                                            const int orientedMarginLeft) const {
-  if (!section || bookmarkStore.isEmpty()) return;
+void EpubReaderActivity::clearHighlightResolutions() {
+  for (auto& entry : resolvedHighlights) entry = {};
+  nextHighlightResolution = 0;
+  lastHighlightRecoveryPage = -1;
+}
 
-  constexpr size_t MAX_VISIBLE_WORDS = 240;
-  std::array<HighlightWordRef, MAX_VISIBLE_WORDS> words{};
-  size_t wordCount = 0;
-  for (const auto& element : page.elements) {
-    if (!element || element->getTag() != TAG_PageLine || wordCount >= words.size()) continue;
-    const auto& line = static_cast<const PageLine&>(*element);
-    const auto& blockPtr = line.getBlock();
-    if (!blockPtr) continue;
-    const auto& block = *blockPtr;
-    const size_t count = block.wordCount();
-    for (size_t index = 0; index < count && wordCount < words.size(); ++index) {
-      const char* raw = block.wordText(index);
-      const char* visible = raw + (hasEmSpacePrefix(raw) ? 3 : 0);
-      bool hasText = false;
-      for (const char* cursor = visible; *cursor; ++cursor) {
-        if (!std::isspace(static_cast<unsigned char>(*cursor))) {
-          hasText = true;
+bool EpubReaderActivity::resolvePendingHighlight(bool& allowBuild) {
+  const int index = std::exchange(pendingHighlightIndex, -1);
+  return resolveHighlight(index, section ? section->currentPage : 0, true, allowBuild);
+}
+
+bool EpubReaderActivity::resolveVisibleHighlights(std::unique_ptr<Page>& page, bool& allowBuild) {
+  if (!section || bookmarkStore.isEmpty() || section->currentPage == lastHighlightRecoveryPage) return true;
+  const int currentPage = section->currentPage;
+  if (currentPage < 0 || currentPage >= section->pageCount) return true;
+  lastHighlightRecoveryPage = currentPage;
+
+  // Reopening a book loses the RAM resolutions. Prepare complete phrases on
+  // this page once per page change, before painting, without navigating away.
+  // Shortlist from text before looking up offsets, so unrelated records cause
+  // no SD reads. Fresh trusted selections and failed/ambiguous checks stay cached.
+  struct Candidate {
+    int index;
+    int hint;
+  };
+  Candidate candidates[HIGHLIGHT_RESOLUTION_CACHE_SIZE];
+  size_t candidateCount = 0;
+  uint8_t protectedSlots = 0;
+  const auto& bookmarks = bookmarkStore.getAll();
+  {
+    HighlightPageWords words(*page);
+    for (size_t slot = 0; slot < HIGHLIGHT_RESOLUTION_CACHE_SIZE; ++slot) {
+      const auto& entry = resolvedHighlights[slot];
+      if (entry.bookmarkIndex < 0 || static_cast<size_t>(entry.bookmarkIndex) >= bookmarks.size()) continue;
+      bool protect = entry.matched && currentPage >= entry.firstPage && currentPage <= entry.lastPage;
+      if (!entry.matched) {
+        const auto& highlight = bookmarks[entry.bookmarkIndex];
+        protect = HighlightTextMatcher::findUnique(highlight.snippet.c_str(), words.size(), [&](const size_t word) {
+                    return words.word(word);
+                  }).found;
+      }
+      if (protect) protectedSlots |= 1U << slot;
+    }
+    const uint8_t allSlots = (1U << HIGHLIGHT_RESOLUTION_CACHE_SIZE) - 1U;
+    if (protectedSlots == allSlots) return true;
+    for (size_t index = 0; index < bookmarks.size(); ++index) {
+      const auto& highlight = bookmarks[index];
+      if (!highlight.isTextHighlight || highlight.spineIndex != currentSpineIndex || highlight.snippet.empty())
+        continue;
+      bool cached = false;
+      for (const auto& entry : resolvedHighlights) {
+        if (entry.bookmarkIndex == static_cast<int>(index)) cached = true;
+      }
+      if (cached) continue;
+      const auto match = HighlightTextMatcher::findUnique(highlight.snippet.c_str(), words.size(),
+                                                          [&](const size_t word) { return words.word(word); });
+      if (!match.found) continue;
+      int hint = highlight.pageNumber;
+      if (highlight.hasVisibleTextOffset) {
+        const auto anchoredPage = section->getPageForVisibleTextOffset(highlight.visibleTextOffset);
+        hint = anchoredPage ? static_cast<int>(*anchoredPage) : -1;
+      } else if (hint >= section->pageCount && (section->isPartial() || section->isBuilding())) {
+        continue;
+      }
+      if (hint >= 0 && (currentPage < hint - HIGHLIGHT_SEARCH_RADIUS || currentPage > hint + HIGHLIGHT_SEARCH_RADIUS))
+        continue;
+      if (candidateCount < HIGHLIGHT_RESOLUTION_CACHE_SIZE) {
+        candidates[candidateCount++] = {static_cast<int>(index), hint};
+      } else if (hint >= 0) {
+        // A known nearby anchor takes priority over unlocated repeated phrases.
+        for (auto& candidate : candidates) {
+          if (candidate.hint >= 0) continue;
+          candidate = {static_cast<int>(index), hint};
           break;
         }
       }
-      if (hasText) {
-        words[wordCount++] = HighlightWordRef{&line, &block, static_cast<uint16_t>(index)};
-      }
     }
   }
+  if (candidateCount == 0) return true;
+  // Release the render Page: full-window checks retain at most two Pages.
+  // Pages without candidates reuse their loaded content without extra SD reads.
+  page.reset();
+  invalidateCurrentOverlayPageCache();
+  for (size_t candidate = 0; candidate < candidateCount; ++candidate) {
+    const auto& highlight = bookmarks[candidates[candidate].index];
+    int hint = candidates[candidate].hint;
+    if (hint < 0) {
+      // A partial LUT cannot yet locate an offset inside its final page. One
+      // bounded build chunk supplies the next boundary and the search margin.
+      if (!extendHighlightBuild(HIGHLIGHT_SEARCH_RADIUS + 1, allowBuild)) return false;
+      const auto anchoredPage = section->getPageForVisibleTextOffset(highlight.visibleTextOffset);
+      if (!anchoredPage) continue;
+      hint = *anchoredPage;
+    }
+    if (currentPage < hint - HIGHLIGHT_SEARCH_RADIUS || currentPage > hint + HIGHLIGHT_SEARCH_RADIUS) continue;
+    if (!resolveHighlight(candidates[candidate].index, hint, false, allowBuild, &protectedSlots)) return false;
+  }
+  page = section->loadPage(currentPage);
+  return true;
+}
+
+bool EpubReaderActivity::extendHighlightBuild(const int pages, bool& allowBuild) {
+  if (!allowBuild || !section->isBuilding()) return true;
+  allowBuild = false;
+  discardOverlayPage();
+  bool built = false;
+  {
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    built = section->buildSomeMore(pages);
+  }
+  resetTaskWatchdogIfSubscribed();
+  releaseReaderSdFontCachesForLowMemory(renderer, "ERS", "highlight recovery window");
+  if (!built) LOG_ERR("ERS", "Failed while extending highlight recovery window");
+  return built;
+}
+
+bool EpubReaderActivity::resolveHighlight(const int index, const int pageHint, const bool navigate, bool& allowBuild,
+                                          uint8_t* protectedSlots) {
+  const auto& bookmarks = bookmarkStore.getAll();
+  if (!section || index < 0 || static_cast<size_t>(index) >= bookmarks.size() || section->pageCount == 0) return true;
+  const auto& highlight = bookmarks[index];
+  if (!highlight.isTextHighlight || highlight.spineIndex != currentSpineIndex || highlight.snippet.empty()) return true;
+
+  ResolvedHighlight* existing = nullptr;
+  for (auto& entry : resolvedHighlights) {
+    if (entry.bookmarkIndex != index) continue;
+    if (entry.matched) {
+      if (navigate) {
+        section->currentPage = entry.firstPage;
+        nextPageNumber = entry.firstPage;
+        invalidateCurrentOverlayPageCache();
+      }
+      return true;
+    }
+    existing = &entry;
+    break;
+  }
+
+  if (!existing) {
+    for (size_t offset = 0; offset < HIGHLIGHT_RESOLUTION_CACHE_SIZE; ++offset) {
+      const size_t slot = (nextHighlightResolution + offset) % HIGHLIGHT_RESOLUTION_CACHE_SIZE;
+      if (protectedSlots && (*protectedSlots & (1U << slot))) continue;
+      existing = &resolvedHighlights[slot];
+      nextHighlightResolution = (slot + 1) % HIGHLIGHT_RESOLUTION_CACHE_SIZE;
+      break;
+    }
+    if (!existing) return true;  // Preserve verified shading already on this page.
+  }
+  if (protectedSlots) *protectedSlots |= 1U << (existing - resolvedHighlights);
+  auto& result = *existing;
+  result = {};
+  result.bookmarkIndex = index;
+
+  // The stored offset is the old PAGE start, only a hint for the phrase.
+  // Keep recovery bounded and before painting, never scan in a highlight paint pass.
+  const int hint = std::max(0, std::min(pageHint, static_cast<int>(section->pageCount) - 1));
+  const int first = std::max(0, hint - HIGHLIGHT_SEARCH_RADIUS);
+  const int wantedLast = std::min(hint + HIGHLIGHT_SEARCH_RADIUS, static_cast<int>(UINT16_MAX) - 1);
+  const int continuation = std::min(wantedLast + 1, static_cast<int>(UINT16_MAX) - 1);
+  invalidateCurrentOverlayPageCache();
+  discardOverlayPage();
+
+  // A cold open may stop building as soon as the old page hint is available.
+  // Give its active builder one bounded chunk to cover the recovery window.
+  // This requests at most HIGHLIGHT_SEARCH_RADIUS + 1 pages; the parser can finish its
+  // current input chunk. Never start or loop a builder here: a loaded partial
+  // cache may require replay from page zero before its watermark can advance.
+  if (section->pageCount <= continuation && !extendHighlightBuild(continuation + 1 - section->pageCount, allowBuild))
+    return false;
+
+  // A partial cache's pageCount is a watermark, not the chapter end. If the
+  // bounded chunk could not cover the window, normal background work continues
+  // and reopening retries. Never accept uniqueness from an incomplete window.
+  if (section->pageCount <= continuation && (section->isPartial() || section->isBuilding())) {
+    LOG_DBG("ERS", "Highlight %d recovery deferred: incomplete page window", index);
+    return true;
+  }
+
+  const int last = std::min(wantedLast, static_cast<int>(section->pageCount) - 1);
+  auto current = section->loadPage(first);
+  ResolvedHighlight found;
+  for (int pageNumber = first; pageNumber <= last; ++pageNumber) {
+    if (!current) {
+      LOG_ERR("ERS", "Highlight %d recovery stopped: unreadable page %d", index, pageNumber);
+      return true;
+    }
+    auto next = pageNumber + 1 < section->pageCount ? section->loadPage(pageNumber + 1) : nullptr;
+    if (pageNumber + 1 < section->pageCount && !next) {
+      LOG_ERR("ERS", "Highlight %d recovery stopped: unreadable continuation", index);
+      return true;
+    }
+    HighlightPageWords words(*current, next.get());
+    const auto match = HighlightTextMatcher::findUnique(
+        highlight.snippet.c_str(), words.size(), [&](const size_t word) { return words.word(word); },
+        words.firstPageSize());
+    if (match.ambiguous || (match.found && found.matched)) {
+      LOG_DBG("ERS", "Highlight %d recovery ambiguous near page %d; keeping original record", index, hint);
+      return true;
+    }
+    if (match.found) {
+      found.bookmarkIndex = index;
+      found.firstPage = pageNumber;
+      found.lastPage = match.end < words.firstPageSize() ? pageNumber : pageNumber + 1;
+      found.firstWord = match.start;
+      found.lastWord = match.end < words.firstPageSize() ? match.end : match.end - words.firstPageSize();
+      found.matched = true;
+    }
+    current = std::move(next);
+    resetTaskWatchdogIfSubscribed();
+  }
+  if (!found.matched) {
+    LOG_DBG("ERS", "Highlight %d text not found near page %d; keeping original record", index, hint);
+    return true;
+  }
+
+  result = found;
+  if (navigate) {
+    section->currentPage = found.firstPage;
+    nextPageNumber = found.firstPage;
+  }
+  LOG_DBG("ERS", "Highlight %d resolved: page %u -> %d (end %d); original record preserved", index,
+          highlight.pageNumber, found.firstPage, found.lastPage);
+  return true;
+}
+
+void EpubReaderActivity::drawTextHighlights(const Page& page, const int orientedMarginTop,
+                                            const int orientedMarginLeft) const {
+  if (!section || bookmarkStore.isEmpty()) return;
+  HighlightPageWords words(page);
+  const size_t wordCount = words.size();
   if (wordCount == 0) return;
 
   const int currentPage = section->currentPage;
   const int fontId = SETTINGS.getReaderFontId();
   const int lineHeight = renderer.getLineHeight(fontId);
-  for (const auto& highlight : bookmarkStore.getAll()) {
+  const auto& bookmarks = bookmarkStore.getAll();
+  for (size_t bookmarkIndex = 0; bookmarkIndex < bookmarks.size(); ++bookmarkIndex) {
+    const auto& highlight = bookmarks[bookmarkIndex];
     if (!highlight.isTextHighlight || highlight.spineIndex != static_cast<uint16_t>(currentSpineIndex) ||
         highlight.snippet.empty()) {
       continue;
     }
-    if (highlight.hasVisibleTextOffset) {
-      const auto anchoredPage = section->getPageForVisibleTextOffset(highlight.visibleTextOffset);
-      if (!anchoredPage || currentPage != static_cast<int>(*anchoredPage)) continue;
-    } else {
-      if (currentPage + 3 < highlight.pageNumber || currentPage > static_cast<int>(highlight.endPageNumber) + 3) {
-        continue;
-      }
-    }
-
     size_t bestStart = wordCount;
     size_t bestEnd = wordCount;
-    int bestDistance = std::numeric_limits<int>::max();
-    for (size_t candidate = 0; candidate < wordCount; ++candidate) {
-      const char* cursor = highlight.snippet.c_str();
-      const char* token = nullptr;
-      size_t tokenLength = 0;
-      size_t pageWord = candidate;
-      size_t tokenOffset = 0;
-      bool matched = true;
-      while (HighlightTextMatcher::nextToken(cursor, token, tokenLength)) {
-        bool tokenComplete = false;
-        while (pageWord < wordCount) {
-          const auto fragment = matchHighlightFragment(words[pageWord], token, tokenLength, tokenOffset);
-          if (fragment.match == HighlightTextMatcher::TokenFragmentMatch::MISMATCH) {
-            matched = false;
-            break;
-          }
-          ++pageWord;
-          tokenOffset += fragment.tokenBytes;
-          if (fragment.match == HighlightTextMatcher::TokenFragmentMatch::COMPLETES_TOKEN) {
-            tokenOffset = 0;
-            tokenComplete = true;
-            break;
-          }
-        }
-        if (!matched || !tokenComplete) {
-          matched = false;
-          break;
-        }
-      }
-      if (!matched || pageWord == candidate) continue;
-      const int distance = std::abs(static_cast<int>(candidate) - static_cast<int>(highlight.startWordIndex));
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestStart = candidate;
-        bestEnd = pageWord - 1;
+    const ResolvedHighlight* resolved = nullptr;
+    for (const auto& entry : resolvedHighlights) {
+      if (entry.bookmarkIndex == static_cast<int>(bookmarkIndex)) {
+        resolved = &entry;
+        break;
       }
     }
-
-    if (bestStart == wordCount && currentPage >= highlight.pageNumber && currentPage <= highlight.endPageNumber &&
-        highlight.startWordIndex < wordCount) {
-      bestStart = highlight.startWordIndex;
-      bestEnd = std::min<size_t>(highlight.endWordIndex, wordCount - 1);
+    if (resolved) {
+      // Also remember failed/ambiguous lookups: never replace them with stale
+      // word indices or a second, unverified occurrence of the same phrase.
+      if (!resolved->matched || currentPage < resolved->firstPage || currentPage > resolved->lastPage) continue;
+      bestStart = currentPage == resolved->firstPage ? resolved->firstWord : 0;
+      bestEnd = currentPage == resolved->lastPage ? resolved->lastWord : wordCount - 1;
+      if (bestStart >= wordCount || bestEnd >= wordCount) continue;
+    } else {
+      // A full passive cache or incomplete window must not fall back to a
+      // locally unique phrase that may be ambiguous on a nearby page.
+      continue;
     }
     if (bestStart == wordCount) continue;
 
     for (size_t index = bestStart; index <= bestEnd; ++index) {
-      const auto& ref = words[index];
+      const auto ref = words.at(index);
       const char* raw = ref.block->wordText(ref.index);
       const auto style = ref.block->wordStyle(ref.index);
       const bool hasIndent = hasEmSpacePrefix(raw);
