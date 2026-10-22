@@ -88,6 +88,7 @@ class ReadingStatsStore {
   SessionState activeSession;
   ReadingSessionSnapshot lastSessionSnapshot;
   uint32_t sessionSerialCounter = 0;
+  bool goalReachedNoticePending = false;
   mutable SummaryCache summaryCache;
   mutable bool dirty = false;
   mutable unsigned long lastSaveMs = 0;
@@ -172,6 +173,8 @@ class ReadingStatsStore {
   uint64_t getTotalReadingMs() const;
   uint64_t getTodayReadingMs() const;
   uint64_t getCurrentSessionMs() const;
+  // True once after live reading pushes today's total past the daily goal.
+  bool consumeGoalReachedNotice();
   uint64_t getRecentReadingMs(uint32_t days) const;
   uint32_t getCurrentStreakDays() const;
   uint32_t getMaxStreakDays() const;

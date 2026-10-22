@@ -375,6 +375,7 @@ std::vector<SettingInfo> buildAppSettings() {
       {StrId::STR_STATE_OFF, StrId::STR_NUM_1, StrId::STR_NUM_7, StrId::STR_NUM_14, StrId::STR_NUM_21}));
   v.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_STATS_BACKUPS, SettingAction::ClearReadingStatsBackups));
   v.push_back(SettingInfo::Toggle(StrId::STR_SHOW_AFTER_READING, &CrossPointSettings::showStatsAfterReading));
+  v.push_back(SettingInfo::Toggle(StrId::STR_GOAL_REACHED_POPUP, &CrossPointSettings::goalReachedPopup));
   v.push_back(SettingInfo::Toggle(StrId::STR_MOVE_COMPLETED_BOOKS, &CrossPointSettings::moveCompletedBooks));
   v.push_back(SettingInfo::Action(StrId::STR_RESET_READING_STATS, SettingAction::ResetReadingStats));
   v.push_back(SettingInfo::Action(StrId::STR_EXPORT_READING_STATS, SettingAction::ExportReadingStats));

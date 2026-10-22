@@ -374,6 +374,8 @@ std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry) {
             "readingStatsAutoBackup", StrId::STR_APPS),
         SettingInfo::Toggle(StrId::STR_SHOW_AFTER_READING, &CrossPointSettings::showStatsAfterReading,
                             "showStatsAfterReading", StrId::STR_APPS),
+        SettingInfo::Toggle(StrId::STR_GOAL_REACHED_POPUP, &CrossPointSettings::goalReachedPopup, "goalReachedPopup",
+                            StrId::STR_APPS),
         // Upstream's moveFinishedToReadFolder aliases this field.
         SettingInfo::Toggle(StrId::STR_MOVE_COMPLETED_BOOKS, &CrossPointSettings::moveCompletedBooks,
                             "moveCompletedBooks", StrId::STR_APPS),

@@ -731,6 +731,7 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
       clamp(doc["achievementsEnabled"] | s.achievementsEnabled, static_cast<uint8_t>(2), s.achievementsEnabled);
   s.achievementPopups =
       clamp(doc["achievementPopups"] | s.achievementPopups, static_cast<uint8_t>(2), s.achievementPopups);
+  s.goalReachedPopup = clamp(doc["goalReachedPopup"] | s.goalReachedPopup, static_cast<uint8_t>(2), s.goalReachedPopup);
 
   const uint8_t shortcutLocationCount = S::SHORTCUT_LOCATION_COUNT;
   const uint8_t shortcutOrderCount = static_cast<uint8_t>(getShortcutDefinitions().size() + 1);
@@ -1101,6 +1102,7 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["moveCompletedBooks"] = s.moveCompletedBooks;  // upstream name: moveFinishedToReadFolder (alias)
   doc["achievementsEnabled"] = s.achievementsEnabled;
   doc["achievementPopups"] = s.achievementPopups;
+  doc["goalReachedPopup"] = s.goalReachedPopup;
 
   doc["opdsServerUrl"] = s.opdsServerUrl;
   doc["opdsUsername"] = s.opdsUsername;

@@ -766,7 +766,13 @@ void ReadingStatsStore::recordReadingTime(ReadingBookStats& book, const uint32_t
   }
 
   getOrCreateBookReadingDay(book, epochSeconds).readingMs += readingMs;
-  getOrCreateReadingDay(epochSeconds).readingMs += readingMs;
+  auto& day = getOrCreateReadingDay(epochSeconds);
+  const uint64_t goalMs = getDailyReadingGoalMs();
+  const bool wasBelowGoal = day.readingMs < goalMs;
+  day.readingMs += readingMs;
+  if (wasBelowGoal && day.readingMs >= goalMs) {
+    goalReachedNoticePending = true;
+  }
 }
 
 void ReadingStatsStore::appendSessionLogEntry(const uint32_t dayOrdinal, const uint32_t sessionMs,
@@ -1195,6 +1201,8 @@ void ReadingStatsStore::beginSession(const std::string& path, const std::string&
   if (activeSession.active) {
     endSession();
   }
+  // A goal crossed while closing the previous session must not pop up in this one.
+  goalReachedNoticePending = false;
 
   if (shouldIgnorePath(path)) {
     activeSession = {};
@@ -1580,6 +1588,12 @@ uint64_t ReadingStatsStore::getCurrentSessionMs() const {
     return 0;
   }
   return activeSession.accumulatedMs;
+}
+
+bool ReadingStatsStore::consumeGoalReachedNotice() {
+  const bool pending = goalReachedNoticePending;
+  goalReachedNoticePending = false;
+  return pending;
 }
 
 uint64_t ReadingStatsStore::getRecentReadingMs(const uint32_t days) const {

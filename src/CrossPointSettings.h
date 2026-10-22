@@ -488,6 +488,7 @@ class CrossPointSettings {
   uint8_t moveCompletedBooks = 0;
   uint8_t achievementsEnabled = 1;
   uint8_t achievementPopups = 1;
+  uint8_t goalReachedPopup = 1;
   uint8_t appsHubShortcutOrder = 1;
   uint8_t browseFilesShortcut = SHORTCUT_HOME;
   uint8_t browseFilesShortcutOrder = 0;

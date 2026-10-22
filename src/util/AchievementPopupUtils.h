@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <GfxRenderer.h>
+#include <I18n.h>
 
 #include <string>
 
@@ -25,4 +26,13 @@ inline bool showPendingAchievementPopups(GfxRenderer& renderer, const unsigned l
     showedAny = true;
   }
   return showedAny;
+}
+
+inline bool showDailyGoalReachedPopup(GfxRenderer& renderer, const unsigned long delayMs = 1200) {
+  if (!SETTINGS.goalReachedPopup) {
+    return false;
+  }
+  GUI.drawPopup(renderer, tr(STR_DAILY_GOAL_REACHED));
+  delay(delayMs);
+  return true;
 }

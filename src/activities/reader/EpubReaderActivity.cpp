@@ -904,6 +904,18 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  if (READING_STATS.consumeGoalReachedNotice()) {
+    bool shown = false;
+    {
+      RenderLock lock(*this);
+      shown = showDailyGoalReachedPopup(renderer);
+    }
+    if (shown) {
+      requestUpdate();
+      return;
+    }
+  }
+
   // Idle prewarm (upstream): once the page has settled, batch-load the next
   // page's glyphs so the coming page turn skips its SD font pass.
   constexpr unsigned long IDLE_PREWARM_DEBOUNCE_MS = 400;

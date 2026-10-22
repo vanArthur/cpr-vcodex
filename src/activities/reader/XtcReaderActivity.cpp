@@ -253,6 +253,18 @@ void XtcReaderActivity::loop() {
     return;
   }
 
+  if (READING_STATS.consumeGoalReachedNotice()) {
+    bool shown = false;
+    {
+      RenderLock lock(*this);
+      shown = showDailyGoalReachedPopup(renderer);
+    }
+    if (shown) {
+      requestUpdate();
+      return;
+    }
+  }
+
   const unsigned long nowMs = millis();
 
   clearEndOfBookOptionsIfNeeded();

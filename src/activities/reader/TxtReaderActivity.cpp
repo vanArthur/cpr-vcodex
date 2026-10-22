@@ -424,6 +424,18 @@ bool TxtReaderActivity::handleBackNavigation() {
 void TxtReaderActivity::loop() {
   if (txt) pluginSession.openOnceRendered(txt->getPath());
   READING_STATS.tickActiveSession();
+
+  if (READING_STATS.consumeGoalReachedNotice()) {
+    bool shown = false;
+    {
+      RenderLock lock(*this);
+      shown = showDailyGoalReachedPopup(renderer);
+    }
+    if (shown) {
+      requestUpdate();
+      return;
+    }
+  }
   const unsigned long nowMs = millis();
 
   clearEndOfBookOptionsIfNeeded();
