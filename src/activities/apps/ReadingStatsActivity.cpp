@@ -11,6 +11,7 @@
 #include "ReadingStatsDetailActivity.h"
 #include "ReadingStatsExtendedActivity.h"
 #include "ReadingStatsStore.h"
+#include "ReadingWrappedActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
@@ -22,6 +23,8 @@ namespace fui = freeink::ui;
 
 namespace {
 constexpr unsigned long BOOK_LONG_PRESS_MS = 1000;
+// Rows 0 and 1 are "More details" and "Reading Wrapped"; started books follow.
+constexpr int FIRST_BOOK_ROW = 2;
 constexpr int SUMMARY_CARD_HEIGHT = 76;
 constexpr int SUMMARY_GAP = 10;
 constexpr int LIST_HEADER_HEIGHT = 34;
@@ -48,7 +51,7 @@ void ReadingStatsActivity::onEnter() {
   UiListActivity::onEnter();
   renderer.requestNextRefresh(HalDisplay::HALF_REFRESH);
   rebuildRows();
-  nav.selected = READING_STATS.getBooks().empty() ? 0 : 1;
+  nav.selected = READING_STATS.getBooks().empty() ? 0 : FIRST_BOOK_ROW;
   waitForConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   waitForBackRelease = false;
   createDueAutoBackupWithFeedback();
@@ -61,21 +64,28 @@ void ReadingStatsActivity::onExit() {
   rowValues.clear();
 }
 
-// Row 0: "More details"; rows 1..N: the started books with "progress | time"
-// in the value slot. Rebuilt whenever the stats store may have changed.
+// Row 0: "More details"; row 1: "Reading Wrapped"; rows 2..N+1: the started
+// books with "progress | time" in the value slot. Rebuilt whenever the stats store may have changed.
 void ReadingStatsActivity::rebuildRows() {
   const auto& books = READING_STATS.getBooks();
   bookCount = static_cast<int>(books.size());
   rowValues.clear();
   rowItems.clear();
-  rowValues.reserve(books.size() + 1);
-  rowItems.reserve(books.size() + 1);
+  rowValues.reserve(books.size() + FIRST_BOOK_ROW);
+  rowItems.reserve(books.size() + FIRST_BOOK_ROW);
 
   fui::ListItem details;
   details.label = tr(STR_MORE_DETAILS);
   details.icon = listIconFor(UIIcon::Library, 32);
   details.actionValue = 0;
   rowItems.push_back(details);
+  rowValues.emplace_back();
+
+  fui::ListItem wrapped;
+  wrapped.label = tr(STR_READING_WRAPPED);
+  wrapped.icon = listIconFor(UIIcon::Trophy, 32);
+  wrapped.actionValue = 1;
+  rowItems.push_back(wrapped);
   rowValues.emplace_back();
 
   for (size_t i = 0; i < books.size(); ++i) {
@@ -87,7 +97,7 @@ void ReadingStatsActivity::rebuildRows() {
     item.subtitle = getBookSubtitle(book);
     item.value = rowValues.back().c_str();
     item.icon = listIconFor(UIIcon::Book, 32);
-    item.actionValue = static_cast<int16_t>(i + 1);
+    item.actionValue = static_cast<int16_t>(i + FIRST_BOOK_ROW);
     rowItems.push_back(item);
   }
 }
@@ -124,7 +134,7 @@ bool ReadingStatsActivity::handleCustomInput() {
 
 bool ReadingStatsActivity::handleButtons() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (nav.selected > 0 && mappedInput.getHeldTime() >= BOOK_LONG_PRESS_MS) {
+    if (nav.selected >= FIRST_BOOK_ROW && mappedInput.getHeldTime() >= BOOK_LONG_PRESS_MS) {
       confirmRemoveBook(nav.selected);
     } else {
       activateIndex(nav.selected);
@@ -142,7 +152,7 @@ void ReadingStatsActivity::activateIndex(const int index) {
 }
 
 void ReadingStatsActivity::onRowLongPress(const int index) {
-  if (index <= 0 || index >= listCount()) return;
+  if (index < FIRST_BOOK_ROW || index >= listCount()) return;
   app.clearTapFlash();
   nav.selected = index;
   confirmRemoveBook(index);
@@ -165,7 +175,11 @@ void ReadingStatsActivity::openEntry(const int index) {
     startActivityForResult(std::make_unique<ReadingStatsExtendedActivity>(renderer, mappedInput), onReturn);
     return;
   }
-  const int bookIndex = index - 1;
+  if (index == 1) {
+    startActivityForResult(std::make_unique<ReadingWrappedActivity>(renderer, mappedInput), onReturn);
+    return;
+  }
+  const int bookIndex = index - FIRST_BOOK_ROW;
   if (bookIndex < 0 || bookIndex >= static_cast<int>(books.size())) {
     return;
   }
@@ -176,7 +190,7 @@ void ReadingStatsActivity::openEntry(const int index) {
 
 void ReadingStatsActivity::confirmRemoveBook(const int index) {
   const auto& books = READING_STATS.getBooks();
-  const int bookIndex = index - 1;
+  const int bookIndex = index - FIRST_BOOK_ROW;
   if (bookIndex < 0 || bookIndex >= static_cast<int>(books.size())) {
     return;
   }
@@ -192,8 +206,8 @@ void ReadingStatsActivity::confirmRemoveBook(const int index) {
                              rebuildRows();
                              if (bookCount == 0) {
                                nav.selected = 0;
-                             } else if (currentSelection > bookCount) {
-                               nav.selected = bookCount;
+                             } else if (currentSelection > bookCount + FIRST_BOOK_ROW - 1) {
+                               nav.selected = bookCount + FIRST_BOOK_ROW - 1;
                              } else {
                                nav.selected = currentSelection;
                              }

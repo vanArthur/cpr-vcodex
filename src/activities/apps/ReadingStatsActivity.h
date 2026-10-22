@@ -6,14 +6,15 @@
 #include "activities/UiListActivity.h"
 
 // Reading statistics overview: summary metric cards (header chrome) above a
-// list whose first row opens the extended stats and whose remaining rows are
+// list whose first rows open the extended stats and Reading Wrapped and whose remaining rows are
 // the started books (activate = detail page, Confirm hold / long-press =
 // remove the book's stats).
 class ReadingStatsActivity final : public UiListActivity {
   bool waitForConfirmRelease = false;
   bool waitForBackRelease = false;
   int bookCount = 0;
-  // Row caches: row 0 is "More details", rows 1..N mirror READING_STATS.getBooks().
+  // Row caches: row 0 is "More details", row 1 is "Reading Wrapped", rows 2..N+1
+  // mirror READING_STATS.getBooks().
   std::vector<std::string> rowValues;
   std::vector<freeink::ui::ListItem> rowItems;
 
