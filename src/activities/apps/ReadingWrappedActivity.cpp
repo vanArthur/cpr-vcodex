@@ -43,6 +43,18 @@ int yearOfTimestamp(const uint32_t epochSeconds) {
   return yearOfDayOrdinal(TimeUtils::getLocalDayOrdinal(epochSeconds));
 }
 
+// Books opened while already at 100% are marked completed without a
+// completedAt stamp, so fall back to when the book was last read.
+int completionYear(const ReadingBookStats& book) {
+  if (const int year = yearOfTimestamp(book.completedAt); year != 0) {
+    return year;
+  }
+  if (const int year = yearOfTimestamp(book.lastReadAt); year != 0) {
+    return year;
+  }
+  return book.readingDays.empty() ? 0 : yearOfDayOrdinal(book.readingDays.back().dayOrdinal);
+}
+
 std::string formatShortDay(const uint32_t dayOrdinal) {
   int year = 0;
   unsigned month = 0;
@@ -160,7 +172,7 @@ void ReadingWrappedActivity::computeSummary() {
         summary.topBook = &book;
       }
     }
-    if (book.completed && yearOfTimestamp(book.completedAt) == year) {
+    if (book.completed && completionYear(book) == year) {
       summary.booksFinished++;
     }
   }
